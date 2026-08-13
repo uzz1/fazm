@@ -232,22 +232,6 @@ struct AIResponseView: View {
                                 currentContentView
                             }
 
-                            // Koah contextual ad slot. Gated by `KoahAdGate.shouldShowAd()`,
-                            // which requires no active subscription AND the `koah_enabled`
-                            // PostHog feature flag to be true (default false → off for
-                            // everyone). Floating bar + pop-out only; not used in onboarding.
-                            // See KoahAdView.swift.
-                            if !isLoading,
-                               let msg = currentMessage,
-                               !userInput.isEmpty,
-                               !msg.copyableText.isEmpty,
-                               msg.isStreaming == false,
-                               KoahAdGate.shouldShowAd() {
-                                KoahAdView(question: userInput, answer: msg.copyableText)
-                                    .padding(.top, 8)
-                                    .id("koah-ad-\(msg.id)")
-                            }
-
                             // Chat observer cards that arrived while the current query was streaming
                             consolidatedPendingChatObserverCards
 
