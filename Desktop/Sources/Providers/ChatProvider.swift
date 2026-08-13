@@ -4464,7 +4464,12 @@ class ChatProvider: ObservableObject {
 
         // Pre-query paywall: hard gate. If no active subscription, block immediately.
         // Fires regardless of onboarding state — onboarding chat must also pass the gate.
-        if !SubscriptionService.shared.isActive {
+        //
+        // Skipped in DeskPilot mode. This gate runs before a provider is chosen,
+        // so it blocks turns that execute entirely on the user's own hardware
+        // through local Hermes and a locally served model, consuming none of
+        // Fazm's hosted infrastructure. Stock Fazm builds are unaffected.
+        if !DeskPilotMode.isOffline, !SubscriptionService.shared.isActive {
             await SubscriptionService.shared.refreshStatus()
             if SubscriptionService.shared.shouldShowPaywall() {
                 log("ChatProvider: pre-query paywall — no active subscription, blocking send")

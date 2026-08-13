@@ -123,12 +123,18 @@ struct DesktopHomeView: View {
         // restores isSignedIn = true).
         .task(id: authState.isSignedIn) {
             guard authState.isSignedIn else { return }
-            log("DesktopHomeView: sign-in detected — checking subscription")
-            await SubscriptionService.shared.refreshStatus()
-            if SubscriptionService.shared.shouldShowPaywall() {
-                log("DesktopHomeView: sign-in gate — no active subscription, showing paywall")
-                viewModelContainer.chatProvider.showPaywall = true
-                PaywallWindowController.shared.show(chatProvider: viewModelContainer.chatProvider)
+            // DeskPilot reaches none of Fazm's hosted services, so there is
+            // nothing here to subscribe to — and no reason to ask the network.
+            if DeskPilotMode.isOffline {
+                log("DesktopHomeView: DeskPilot mode — skipping the subscription gate")
+            } else {
+                log("DesktopHomeView: sign-in detected — checking subscription")
+                await SubscriptionService.shared.refreshStatus()
+                if SubscriptionService.shared.shouldShowPaywall() {
+                    log("DesktopHomeView: sign-in gate — no active subscription, showing paywall")
+                    viewModelContainer.chatProvider.showPaywall = true
+                    PaywallWindowController.shared.show(chatProvider: viewModelContainer.chatProvider)
+                }
             }
         }
         // Observe ChatProvider flags
