@@ -194,9 +194,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Configure Firebase and AuthService
         AuthService.shared.configure()
 
-        // Initialize subscription service early to fetch account creation date
-        _ = SubscriptionService.shared
-
         log("AppDelegate: applicationDidFinishLaunching started (mode: \(FazmApp.launchMode.rawValue))")
         log("AppDelegate: AuthState.isSignedIn=\(AuthState.shared.isSignedIn)")
 
@@ -326,21 +323,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 for window in NSApp.windows where window.title.hasPrefix("Fazm") {
                     window.makeKeyAndOrderFront(nil)
                 }
-            }
-        }
-
-        // Test trigger: open the founder chat sheet inside onboarding.
-        // The distributed notification is registered here once at launch; it
-        // rebroadcasts as a local NotificationCenter event that OnboardingView
-        // observes via .onReceive (avoids leaking an observer per OnboardingView mount).
-        // Legacy: xcrun swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("com.fazm.openFounderChatInOnboarding"), object: nil, userInfo: nil, deliverImmediately: true); RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.0))'
-        // Bundle-scoped: replace `com.fazm.openFounderChatInOnboarding` with `com.fazm.desktop-dev.openFounderChatInOnboarding` (dev) or `com.fazm.app.openFounderChatInOnboarding` (prod).
-        DistributedNotificationCenter.default().addFazmObserver(
-            "openFounderChatInOnboarding"
-        ) { _ in
-            Task { @MainActor in
-                log("FazmApp: openFounderChatInOnboarding triggered")
-                NotificationCenter.default.post(name: .openFounderChatInOnboarding, object: nil)
             }
         }
 
@@ -1093,36 +1075,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for window in NSApp.windows where window.title.hasPrefix("Fazm") {
                 if window.isMiniaturized { window.deminiaturize(nil) }
                 window.makeKeyAndOrderFront(nil)
-            }
-        case "subscription":
-            // Handle subscription success/cancel redirects from Stripe Checkout
-            let path = url.path
-            log("FazmApp: Subscription URL callback: \(path)")
-            NSApp.activate(ignoringOtherApps: true)
-            if path == "/success" {
-                // Refresh subscription status, dismiss paywall, and notify user
-                Task {
-                    let active = await SubscriptionService.shared.refreshStatus()
-                    await MainActor.run {
-                        PaywallWindowController.shared.close()
-                        if active {
-                            ToastManager.shared.show("You're on Fazm Pro!", icon: "checkmark.circle.fill")
-                        }
-                    }
-                }
-            }
-        case "referral":
-            // Handle referral code from referral link: fazm://referral/{code}
-            let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if !code.isEmpty {
-                log("FazmApp: Referral code received: \(code)")
-                NSApp.activate(ignoringOtherApps: true)
-                Task {
-                    await ReferralService.shared.trackReferralSignup(code: code)
-                    await MainActor.run {
-                        ToastManager.shared.show("Referral applied!", icon: "checkmark.circle.fill")
-                    }
-                }
             }
         case "settings":
             // Deep link to a specific settings page, e.g. fazm://settings/tool-timeouts

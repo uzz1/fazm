@@ -92,9 +92,6 @@ struct SettingsSearchItem: Identifiable {
         SettingsSearchItem(name: "Visible GPT Models", subtitle: "Choose which GPT models appear in the floating-bar picker", keywords: ["codex", "gpt", "gpt-5", "models", "picker", "visible", "customize", "5.3", "5.4", "5.5", "quota"], section: .advanced, advancedSubsection: .aiChat, icon: "slider.horizontal.3", settingId: "advanced.codex.models"),
 
         // Account
-        SettingsSearchItem(name: "Account", subtitle: "Your signed-in account and sign out", keywords: ["account", "sign out", "email", "profile", "user"], section: .about, advancedSubsection: nil, icon: "person.crop.circle", settingId: "about.account"),
-        SettingsSearchItem(name: "Subscription", subtitle: "Manage your Fazm Pro subscription or free trial", keywords: ["subscription", "pro", "upgrade", "trial", "plan", "billing", "payment"], section: .about, advancedSubsection: nil, icon: "checkmark.seal.fill", settingId: "about.subscription"),
-        SettingsSearchItem(name: "Referrals", subtitle: "Refer friends and earn free months of Pro", keywords: ["referral", "refer", "invite", "friend", "credit", "free month", "share"], section: .about, advancedSubsection: nil, icon: "person.2.fill", settingId: "about.referral"),
         SettingsSearchItem(name: "Version Info", subtitle: "Current app version and build number", keywords: ["version", "build", "app version", "build number"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.version"),
         SettingsSearchItem(name: "Report an Issue", subtitle: "Help us improve Fazm", keywords: ["bug", "feedback", "report", "issue"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.reportissue"),
     ]
@@ -107,7 +104,6 @@ struct SettingsSidebar: View {
     @Binding var highlightedSettingId: String?
     @ObservedObject var appState: AppState
 
-    @ObservedObject private var founderChatService = FounderChatService.shared
     @State private var searchQuery = ""
     @State private var discoveredTasksUnread = 0
     @FocusState private var isSearchFocused: Bool
@@ -159,7 +155,7 @@ struct SettingsSidebar: View {
                                 isSelected: selectedSection == section,
                                 iconWidth: iconWidth,
                                 showWarning: section == .permissions && appState.hasMissingPermissions,
-                                badgeCount: section == .discoveredTasks ? discoveredTasksUnread : (section == .chatWithFounder ? founderChatService.unreadCount : 0),
+                                badgeCount: section == .discoveredTasks ? discoveredTasksUnread : 0,
                                 onTap: {
                                     withAnimation(.easeInOut(duration: 0.15)) {
                                         selectedSection = section
@@ -202,7 +198,6 @@ struct SettingsSidebar: View {
         .background(FazmColors.backgroundPrimary)
         .onAppear {
             refreshUnreadCount()
-            founderChatService.startPolling()
         }
         .onReceive(unreadRefreshTimer) { _ in refreshUnreadCount() }
     }
@@ -299,7 +294,6 @@ struct SettingsSidebarItem: View {
         switch section {
         case .conversationHistory: return "clock.arrow.circlepath"
         case .home: return "menubar.dock.rectangle"
-        case .chatWithFounder: return "bubble.left.and.bubble.right"
         case .routines: return "repeat.circle"
         case .discoveredTasks: return "wand.and.stars"
         case .remoteControl: return "iphone"

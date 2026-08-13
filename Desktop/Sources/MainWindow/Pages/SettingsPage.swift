@@ -12,10 +12,7 @@ struct SettingsPage: View {
 
     var body: some View {
         Group {
-            if selectedSection == .chatWithFounder {
-                // Chat page fills the entire content area (no header/scroll wrapper)
-                FounderChatPage()
-            } else if selectedSection == .memoryGraph {
+            if selectedSection == .memoryGraph {
                 // Memory graph fills the entire content area (full-bleed 3D scene)
                 MemoryGraphPage()
             } else {
@@ -179,19 +176,10 @@ struct SettingsContentView: View {
     @ObservedObject private var codexBackend = CodexBackendManager.shared
     @State private var showAddMCPServer = false
     @State private var editingMCPServer: MCPServerManager.MCPServerConfig?
-    @State private var showSignOutAlert = false
-    /// `signin-optional` experiment: when an anonymous user taps "Save Account"
-    /// in the About section, present SignInView so they can link their UID to
-    /// a real Google/magic-link account without leaving Settings.
-    @State private var showSaveAccountSheet = false
-    @State private var referralStatus: ReferralService.ReferralStatusResponse?
-    @State private var isLoadingReferralStatus = false
-    @State private var referralLinkCopied = false
 
     enum SettingsSection: String, CaseIterable {
         case conversationHistory = "Conversations"
         case home = "Floating Bar"
-        case chatWithFounder = "Chat with Founder"
         case routines = "Routines"
         case discoveredTasks = "Discovered Tasks"
         case remoteControl = "Remote Control"
@@ -246,8 +234,6 @@ struct SettingsContentView: View {
                     HomeSection(appState: appState)
                 case .conversationHistory:
                     ConversationHistorySection(chatProvider: chatProvider, appState: appState)
-                case .chatWithFounder:
-                    FounderChatPage()
                 case .routines:
                     RoutinesSection(chatProvider: chatProvider)
                 case .discoveredTasks:
@@ -3470,283 +3456,6 @@ struct SettingsContentView: View {
 
     private var aboutSection: some View {
         VStack(spacing: 20) {
-            // Account card
-            if authState.isSignedIn {
-                settingsCard(settingId: "about.account") {
-                    HStack(spacing: 16) {
-                        Image(systemName: authState.isAnonymous ? "person.crop.circle.badge.plus" : "person.crop.circle")
-                            .scaledFont(size: 16)
-                            .foregroundColor(FazmColors.textSecondary)
-                            .frame(width: 24, height: 24)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Account")
-                                .scaledFont(size: 16, weight: .semibold)
-                                .foregroundColor(FazmColors.textPrimary)
-
-                            if authState.isAnonymous {
-                                Text("Guest account — sign in to save your data")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            } else {
-                                Text(authState.userEmail ?? "Signed in")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            }
-                        }
-
-                        Spacer()
-
-                        if authState.isAnonymous {
-                            Button(action: { showSaveAccountSheet = true }) {
-                                Text("Sign In")
-                                    .scaledFont(size: 13, weight: .medium)
-                                    .foregroundColor(.black)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .fill(.white)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button(action: { showSignOutAlert = true }) {
-                                Text("Sign Out")
-                                    .scaledFont(size: 13, weight: .medium)
-                                    .foregroundColor(.red)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .fill(Color.red.opacity(0.12))
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .alert("Sign Out?", isPresented: $showSignOutAlert) {
-                    Button("Cancel", role: .cancel) { }
-                    Button("Sign Out", role: .destructive) {
-                        AuthService.shared.signOut()
-                    }
-                } message: {
-                    Text("You will be signed out of Fazm.")
-                }
-                .sheet(isPresented: $showSaveAccountSheet) {
-                    SignInView(authState: authState)
-                        .frame(width: 480, height: 600)
-                }
-                .onReceive(authState.$isAnonymous) { isAnon in
-                    // Successful link/sign-in flipped the user from anon to
-                    // named — auto-dismiss the sheet so the user lands back
-                    // in Settings with the regular Account row.
-                    if !isAnon && showSaveAccountSheet {
-                        showSaveAccountSheet = false
-                    }
-                }
-            }
-
-            // Subscription card
-            settingsCard(settingId: "about.subscription") {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 12) {
-                        Image(systemName: SubscriptionService.shared.isActive ? "checkmark.seal.fill" : "clock.fill")
-                            .scaledFont(size: 16)
-                            .foregroundColor(SubscriptionService.shared.isActive ? FazmColors.success : FazmColors.purplePrimary)
-                            .frame(width: 24, height: 24)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(SubscriptionService.shared.isActive ? "Fazm Pro" : (SubscriptionService.shared.isTrialExpired ? "Free Plan" : "Free Trial"))
-                                .scaledFont(size: 16, weight: .semibold)
-                                .foregroundColor(FazmColors.textPrimary)
-
-                            if SubscriptionService.shared.isActive {
-                                if let end = SubscriptionService.shared.currentPeriodEnd {
-                                    Text("Renews \(end.formatted(date: .abbreviated, time: .omitted))")
-                                        .scaledFont(size: 13)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                }
-                            } else if !SubscriptionService.shared.isTrialExpired {
-                                let daysLeft = max(0, SubscriptionService.shared.trialDays - (Calendar.current.dateComponents([.day], from: SubscriptionService.shared.trialStartDate, to: Date()).day ?? 0))
-                                Text("\(daysLeft) days remaining in free trial")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            } else {
-                                Text("\(SubscriptionService.shared.freeMessagesPerDay) free messages per day")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            }
-                        }
-
-                        Spacer()
-
-                        if SubscriptionService.shared.isActive {
-                            Button(action: {
-                                Task { try? await SubscriptionService.shared.openBillingPortal() }
-                            }) {
-                                Text("Manage")
-                                    .scaledFont(size: 13, weight: .semibold)
-                                    .foregroundColor(FazmColors.textSecondary)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(FazmColors.backgroundTertiary)
-                                    .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button(action: {
-                                AnalyticsManager.shared.subscriptionUpgradeTapped(source: "settings")
-                                Task { @MainActor in
-                                    do {
-                                        try await SubscriptionService.shared.openCheckout()
-                                    } catch AuthError.notSignedIn {
-                                        AuthState.shared.error = "Your session expired. Please sign in again to upgrade."
-                                        AuthService.shared.reconcileAuthState()
-                                    } catch {
-                                        log("SettingsPage: Upgrade failed: \(error.localizedDescription)")
-                                    }
-                                }
-                            }) {
-                                Text("Upgrade")
-                                    .scaledFont(size: 13, weight: .semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 6)
-                                    .background(FazmColors.purplePrimary)
-                                    .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-
-            // Referral card
-            settingsCard(settingId: "about.referral") {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.2.fill")
-                            .scaledFont(size: 16)
-                            .foregroundStyle(FazmColors.purpleGradient)
-                            .frame(width: 24, height: 24)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Referrals")
-                                .scaledFont(size: 16, weight: .semibold)
-                                .foregroundColor(FazmColors.textPrimary)
-
-                            if isLoadingReferralStatus {
-                                Text("Loading...")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            } else if let status = referralStatus {
-                                if status.reward_months > 0 {
-                                    Text("$\(status.reward_months * ReferralService.creditPerReferralUSD) credit earned")
-                                        .scaledFont(size: 13)
-                                        .foregroundColor(FazmColors.success)
-                                } else if status.referred_count > 0 {
-                                    Text("\(status.referred_count) referred, \(status.completed_count) completed")
-                                        .scaledFont(size: 13)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                } else {
-                                    Text("Invite friends, earn free months")
-                                        .scaledFont(size: 13)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                }
-                            } else {
-                                Text("Invite friends, earn free months")
-                                    .scaledFont(size: 13)
-                                    .foregroundColor(FazmColors.textTertiary)
-                            }
-                        }
-
-                        Spacer()
-
-                        if let status = referralStatus, !status.code.isEmpty {
-                            Button(action: {
-                                Task { try? await ReferralService.shared.copyReferralLink() }
-                                referralLinkCopied = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { referralLinkCopied = false }
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: referralLinkCopied ? "checkmark" : "doc.on.doc")
-                                        .scaledFont(size: 11)
-                                    Text(referralLinkCopied ? "Copied!" : "Copy Link")
-                                        .scaledFont(size: 13, weight: .semibold)
-                                }
-                                .foregroundColor(referralLinkCopied ? FazmColors.success : FazmColors.textSecondary)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 6)
-                                .background(FazmColors.backgroundTertiary)
-                                .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    if let status = referralStatus, !status.code.isEmpty {
-                        Divider().foregroundColor(FazmColors.border)
-
-                        // Referral code display
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Your code")
-                                    .scaledFont(size: 11)
-                                    .foregroundColor(FazmColors.textTertiary)
-                                Text(status.code)
-                                    .scaledFont(size: 15, weight: .bold)
-                                    .foregroundColor(FazmColors.textPrimary)
-                                    .tracking(2)
-                            }
-
-                            Spacer()
-
-                            // Stats
-                            HStack(spacing: 16) {
-                                VStack(spacing: 2) {
-                                    Text("\(status.referred_count)")
-                                        .scaledFont(size: 15, weight: .bold)
-                                        .foregroundColor(FazmColors.textPrimary)
-                                    Text("Referred")
-                                        .scaledFont(size: 11)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                }
-                                VStack(spacing: 2) {
-                                    Text("\(status.completed_count)")
-                                        .scaledFont(size: 15, weight: .bold)
-                                        .foregroundColor(FazmColors.success)
-                                    Text("Completed")
-                                        .scaledFont(size: 11)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                }
-                                VStack(spacing: 2) {
-                                    Text("$\(status.reward_months * ReferralService.creditPerReferralUSD)")
-                                        .scaledFont(size: 15, weight: .bold)
-                                        .foregroundColor(FazmColors.purplePrimary)
-                                    Text("Credit")
-                                        .scaledFont(size: 11)
-                                        .foregroundColor(FazmColors.textTertiary)
-                                }
-                            }
-                        }
-
-                        // How it works
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("How it works")
-                                .scaledFont(size: 12, weight: .medium)
-                                .foregroundColor(FazmColors.textSecondary)
-                            Text("Share your link. When a friend installs Fazm and sends 5 messages, you get 1 month of Pro free.")
-                                .scaledFont(size: 12)
-                                .foregroundColor(FazmColors.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-            .onAppear { loadReferralStatus() }
-
             settingsCard(settingId: "about.version") {
                 VStack(spacing: 16) {
                     // App info
@@ -4031,39 +3740,6 @@ struct SettingsContentView: View {
     private func restartTranscriptionIfNeeded() {
         // Restart PTT transcription service if needed to apply new language settings
         // The next PTT activation will pick up the new language from AssistantSettings
-    }
-
-    // MARK: - Referral Status
-
-    private func loadReferralStatus() {
-        guard !isLoadingReferralStatus else { return }
-        isLoadingReferralStatus = true
-        Task {
-            var status = try? await ReferralService.shared.fetchReferralStatus()
-
-            // If the status fetch failed (offline/transient) or returned no code yet, make sure
-            // a code exists so the Copy Link button and code always render. generateReferralCode()
-            // returns the locally cached code without a network call when one already exists, so
-            // this also unblocks users whose status fetch failed but who already have a code.
-            if status == nil || (status?.code.isEmpty ?? true) {
-                if let generated = try? await ReferralService.shared.generateReferralCode() {
-                    status = ReferralService.ReferralStatusResponse(
-                        code: generated.code,
-                        referral_url: generated.url,
-                        referred_count: status?.referred_count ?? 0,
-                        completed_count: status?.completed_count ?? 0,
-                        reward_months: status?.reward_months ?? 0
-                    )
-                }
-            }
-
-            await MainActor.run {
-                if let status = status {
-                    self.referralStatus = status
-                }
-                self.isLoadingReferralStatus = false
-            }
-        }
     }
 
 }

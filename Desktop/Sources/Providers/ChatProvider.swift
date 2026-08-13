@@ -797,9 +797,6 @@ class ChatProvider: ObservableObject {
     /// callers now coalesce onto this single task.
     private var bridgeStartInFlight: Task<Bool, Never>?
 
-    /// Whether the paywall should be shown (blocks AI response until subscription)
-    @Published var showPaywall = false
-
     /// Whether the ACP bridge requires authentication (shown as sheet in UI)
     @Published var isClaudeAuthRequired = false
     @Published var claudeAuthTimedOut = false
@@ -854,10 +851,8 @@ class ChatProvider: ObservableObject {
     /// Cumulative cost tracked locally (seeded from Firestore on startup)
     @AppStorage("builtinCumulativeCostUsd") var builtinCumulativeCostUsd: Double = 0.0
 
-    /// Whether the user is over the built-in cost cap. The cap applies to
-    /// EVERY user equally — free, trial, and Pro alike. Do NOT add a
-    /// `SubscriptionService.shared.isActive` check here; see the policy block
-    /// above this property for why.
+    /// Whether the user is over the built-in cost cap. The cap applies
+    /// unconditionally; see the policy block above this property for why.
     var isOverBuiltinCap: Bool {
         return builtinCumulativeCostUsd >= Self.builtinCostCapUsd
     }
@@ -4428,24 +4423,13 @@ class ChatProvider: ObservableObject {
             return
         }
 
-        // Pre-query paywall: hard gate. If no active subscription, block immediately.
-        // Fires regardless of onboarding state — onboarding chat must also pass the gate.
-        //
-        // Skipped in DeskPilot mode. This gate runs before a provider is chosen,
-        // so it blocks turns that execute entirely on the user's own hardware
-        // through local Hermes and a locally served model, consuming none of
-        // Fazm's hosted infrastructure. Stock Fazm builds are unaffected.
-        if !DeskPilotMode.isOffline, !SubscriptionService.shared.isActive {
-            await SubscriptionService.shared.refreshStatus()
-            if SubscriptionService.shared.shouldShowPaywall() {
-                log("ChatProvider: pre-query paywall — no active subscription, blocking send")
-                showPaywall = true
-                PaywallWindowController.shared.show(chatProvider: self)
-                sendingSessionKeys.remove(effectiveKey)
-                isSending = !sendingSessionKeys.isEmpty
-                return
-            }
-        }
+        // The pre-query paywall used to sit here. It asked Fazm's backend
+        // whether this Firebase user held an active Stripe subscription, and
+        // blocked the send when the answer was no. With no account there is no
+        // subscriber to look up and no endpoint that would answer, so the gate
+        // is gone rather than permanently failing open on a lookup that can
+        // never succeed. DeskPilot runs on the user's own hardware; there was
+        // never anything here for it to buy.
 
         errorMessage = nil
         // Clear any "session restored" banner from the previous turn — if it fires

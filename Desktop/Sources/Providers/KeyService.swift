@@ -1,26 +1,28 @@
 import Foundation
-import IOKit
 
-/// Fetches and caches API keys from the backend for authenticated users.
-/// Keys are held in memory only — fetched fresh each app launch.
+/// Resolves API keys for the third-party services the app still talks to.
+///
+/// This used to POST `${FAZM_BACKEND_URL}/v1/keys` with a Firebase ID token and
+/// receive Fazm's own vendor keys. DeskPilot has no account and no token, so
+/// that endpoint is unreachable by design and the call is gone. Keys now come
+/// from the process environment (`.env.app`) only, which is where a local-first
+/// build should read its own credentials from anyway.
+///
+/// The async surface (`fetchKeys`, `ensureKeys`, `refetchAnthropicKey`) is kept
+/// because callers await it on paths that used to race the network. Reading
+/// `environ` is synchronous, so these now just resolve immediately.
 final class KeyService {
     static let shared = KeyService()
 
-    private(set) var anthropicAPIKey: String?
-    private(set) var deepgramAPIKey: String?
-    private(set) var geminiAPIKey: String?
-    private(set) var elevenlabsAPIKey: String?
-    private var hasFetched = false
+    var anthropicAPIKey: String? { Self.nonEmptyEnv("ANTHROPIC_API_KEY") }
+    var deepgramAPIKey: String? { Self.nonEmptyEnv("DEEPGRAM_API_KEY") }
+    var geminiAPIKey: String? { Self.nonEmptyEnv("GEMINI_API_KEY") }
+    var elevenlabsAPIKey: String? { Self.nonEmptyEnv("ELEVENLABS_API_KEY") }
 
-    /// Resolve the ElevenLabs API key, waiting for KeyService if needed.
-    /// Mirrors `TranscriptionService.resolveDeepgramKey` so callers have the
-    /// same env-var-then-backend lookup order.
+    /// Resolve the ElevenLabs API key. Mirrors `TranscriptionService.resolveDeepgramKey`
+    /// so callers keep the same lookup shape.
     static func resolveElevenLabsKey() async throws -> String {
-        if let envKey = getenv("ELEVENLABS_API_KEY").flatMap({ String(validatingUTF8: $0) }), !envKey.isEmpty {
-            return envKey
-        }
-        await KeyService.shared.ensureKeys()
-        if let k = KeyService.shared.elevenlabsAPIKey, !k.isEmpty { return k }
+        if let k = KeyService.shared.elevenlabsAPIKey { return k }
         throw NSError(
             domain: "KeyService",
             code: 1,
@@ -28,196 +30,31 @@ final class KeyService {
         )
     }
 
-    /// Task that represents the in-flight fetchKeys() call, so callers can await it.
-    private var fetchTask: Task<Void, Never>?
+    private init() {}
 
-    /// Read dynamically so that KeyService.shared can be initialized before loadEnvironment()
-    /// sets FAZM_BACKEND_URL via setenv(). If we cached this in init(), returning users would
-    /// get an empty URL because AuthService.configure() triggers the singleton before AppState.init().
-    private var backendUrl: String {
-        Self.env("FAZM_BACKEND_URL").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
-    private let deviceId: String
+    /// No-op retained for call-site compatibility: keys are read from the
+    /// environment on every access, so there is nothing to fetch.
+    func fetchKeys() async {}
 
-    private init() {
-        self.deviceId = Self.getDeviceId()
-    }
-
-    /// Kick off key fetching. Called fire-and-forget from AuthService; the returned Task
-    /// is stored so that `ensureKeys()` can await it later.
-    func fetchKeys() async {
-        guard !hasFetched else { return }
-
-        // If a fetch is already in flight, just await it
-        if let existing = fetchTask {
-            await existing.value
-            return
-        }
-
-        let task = Task { [self] in
-            await _doFetch()
-        }
-        fetchTask = task
-        await task.value
-    }
-
-    /// Force a re-fetch of keys from the backend, ignoring the `hasFetched` cache.
-    /// Use this when the bundled Anthropic key fails authentication mid-session
-    /// (e.g. backend rotated or revoked it). Returns true if the new
-    /// anthropic_api_key differs from the previous value, indicating the
-    /// caller should restart the bridge to pick up the new key.
+    /// No-op retained for call-site compatibility. Always reports "unchanged"
+    /// because the environment is the only source and it does not rotate
+    /// mid-process.
     @discardableResult
     func refetchAnthropicKey() async -> Bool {
-        let oldKey = anthropicAPIKey
-        let oldSuffix = oldKey.map { String($0.suffix(8)) } ?? "nil"
-        log("KeyService: refetchAnthropicKey() — clearing cache (oldKey ending=\(oldSuffix))")
-        // Clear the cache flag and any in-flight task so _doFetch runs fresh.
-        hasFetched = false
-        fetchTask = nil
-        let task = Task { [self] in await _doFetch() }
-        fetchTask = task
-        await task.value
-        let newKey = anthropicAPIKey
-        let changed = (newKey ?? "") != (oldKey ?? "")
-        let newSuffix = newKey.map { String($0.suffix(8)) } ?? "nil"
-        log("KeyService: refetchAnthropicKey() done (newKey ending=\(newSuffix), changed=\(changed))")
-        return changed
+        log("KeyService: refetchAnthropicKey() — keys come from the environment, nothing to refetch")
+        return false
     }
 
-    /// Wait for keys to be available (up to `timeout` seconds).
-    /// Call this before using `deepgramAPIKey` or `anthropicAPIKey`.
+    /// No-op retained for call-site compatibility.
     func ensureKeys(timeout: TimeInterval = 10) async {
-        if hasFetched { return }
-
-        // Await the in-flight fetch, or start one if none exists
-        if let task = fetchTask {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await task.value }
-                group.addTask { try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) }
-                // Return as soon as either completes
-                await group.next()
-                group.cancelAll()
-            }
-        } else {
-            // No fetch in flight — kick one off and await it with timeout
-            let task = Task { [self] in await _doFetch() }
-            fetchTask = task
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await task.value }
-                group.addTask { try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) }
-                await group.next()
-                group.cancelAll()
-            }
-        }
-
-        if !hasFetched {
-            log("KeyService: ensureKeys timed out after \(timeout)s")
-        }
-    }
-
-    private func _doFetch() async {
-        guard !hasFetched else { return }
-        guard !backendUrl.isEmpty else {
-            log("KeyService: missing FAZM_BACKEND_URL, skipping key fetch")
-            // Clear fetchTask so the next ensureKeys() retries (env may be loaded by then)
-            fetchTask = nil
-            return
-        }
-        guard await AuthService.shared.isSignedIn else {
-            log("KeyService: user not signed in, skipping key fetch")
-            fetchTask = nil
-            return
-        }
-
-        // Try up to 2 times: first with current token, then with a force-refreshed token
-        for attempt in 1...2 {
-            do {
-                let forceRefresh = attempt > 1
-                if forceRefresh {
-                    log("KeyService: retrying with force-refreshed token")
-                }
-                let token = try await AuthService.shared.getIdToken(forceRefresh: forceRefresh)
-                let authHeader = "Bearer \(token)"
-                let url = URL(string: "\(backendUrl)/v1/keys")!
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue(authHeader, forHTTPHeaderField: "Authorization")
-                request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-                request.timeoutInterval = 15
-
-                let (data, response) = try await URLSession.shared.data(for: request)
-
-                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-
-                if (status == 401 || status == 403) && attempt < 2 {
-                    log("KeyService: fetch got \(status), will retry with refreshed token")
-                    continue
-                }
-
-                guard status == 200 else {
-                    let body = String(data: data, encoding: .utf8) ?? ""
-                    log("KeyService: fetch failed with status \(status): \(body)")
-                    // Don't set hasFetched — allow future retries for transient failures
-                    // (cold start timeouts, expired tokens, server errors)
-                    fetchTask = nil
-                    return
-                }
-
-                struct KeysResponse: Decodable {
-                    let anthropic_api_key: String
-                    let deepgram_api_key: String
-                    let gemini_api_key: String?
-                    let elevenlabs_api_key: String?
-                }
-
-                let keys = try JSONDecoder().decode(KeysResponse.self, from: data)
-                if !keys.anthropic_api_key.isEmpty {
-                    anthropicAPIKey = keys.anthropic_api_key
-                }
-                if !keys.deepgram_api_key.isEmpty {
-                    deepgramAPIKey = keys.deepgram_api_key
-                }
-                if let gemini = keys.gemini_api_key, !gemini.isEmpty {
-                    geminiAPIKey = gemini
-                }
-                if let elevenlabs = keys.elevenlabs_api_key, !elevenlabs.isEmpty {
-                    elevenlabsAPIKey = elevenlabs
-                }
-                hasFetched = true
-                log("KeyService: fetched keys (anthropic=\(anthropicAPIKey != nil), deepgram=\(deepgramAPIKey != nil), gemini=\(geminiAPIKey != nil), elevenlabs=\(elevenlabsAPIKey != nil))")
-                return
-            } catch {
-                if attempt < 2 {
-                    log("KeyService: fetch error (attempt \(attempt)): \(error.localizedDescription), retrying...")
-                    continue
-                }
-                log("KeyService: fetch error: \(error.localizedDescription)")
-                // Don't set hasFetched — allow future retries
-                fetchTask = nil
-            }
-        }
+        _ = timeout
     }
 
     // MARK: - Private Helpers
 
-    private static func env(_ key: String) -> String {
-        if let ptr = getenv(key) { return String(cString: ptr) }
-        return ""
-    }
-
-    private static func getDeviceId() -> String {
-        let platformExpert = IOServiceGetMatchingService(
-            kIOMainPortDefault,
-            IOServiceMatching("IOPlatformExpertDevice")
-        )
-        guard platformExpert != 0 else { return UUID().uuidString }
-        defer { IOObjectRelease(platformExpert) }
-
-        if let uuidCF = IORegistryEntryCreateCFProperty(
-            platformExpert, "IOPlatformUUID" as CFString, kCFAllocatorDefault, 0
-        )?.takeRetainedValue() as? String {
-            return uuidCF
-        }
-        return UUID().uuidString
+    private static func nonEmptyEnv(_ key: String) -> String? {
+        guard let ptr = getenv(key) else { return nil }
+        let value = String(cString: ptr)
+        return value.isEmpty ? nil : value
     }
 }

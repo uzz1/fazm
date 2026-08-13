@@ -479,8 +479,6 @@ struct SignInView: View {
                 authState.update(isSignedIn: true, userEmail: AuthService.shared.userEmail)
                 authState.isLoading = false
                 magicLinkStep = .idle
-                // Refresh subscription status for the newly signed-in user
-                Task { await SubscriptionService.shared.refreshStatus() }
             } catch {
                 authState.isLoading = false
                 // Clear the code so the user can try again without manually deleting digits.
@@ -501,8 +499,6 @@ struct SignInView: View {
                 UserDefaults.standard.set(true, forKey: "signInJustCompleted")
                 authState.update(isSignedIn: true, userEmail: AuthService.shared.userEmail)
                 authState.isLoading = false
-                // Refresh subscription status for the newly signed-in user
-                Task { await SubscriptionService.shared.refreshStatus() }
             } catch AuthError.cancelled {
                 authState.isLoading = false
             } catch {

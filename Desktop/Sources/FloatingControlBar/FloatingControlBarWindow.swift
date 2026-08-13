@@ -1641,20 +1641,6 @@ class FloatingControlBarManager {
             }
         }
 
-        // Debug: show the paywall popup
-        // Trigger (legacy, every build): xcrun swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("com.fazm.testPaywall"), object: nil, userInfo: nil, deliverImmediately: true); RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.0))'
-        // Bundle-scoped: replace `com.fazm.testPaywall` with `com.fazm.desktop-dev.testPaywall` or `com.fazm.app.testPaywall`.
-        DistributedNotificationCenter.default().addFazmObserver(
-            "testPaywall"
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let provider = self?.chatProvider else { return }
-                log("FloatingControlBarManager: Test paywall triggered")
-                provider.showPaywall = true
-                PaywallWindowController.shared.show(chatProvider: provider, userInitiated: true)
-            }
-        }
-
         // Programmatic control: unified command interface for all floating bar controls.
         // Trigger (legacy, every build): xcrun swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("com.fazm.control"), object: nil, userInfo: ["command": "getState"], deliverImmediately: true); RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.0))'
         // Bundle-scoped (target one build only, recommended when both dev and prod are running):

@@ -104,26 +104,10 @@ struct DesktopHomeView: View {
         .background(FazmColors.backgroundPrimary)
         .frame(minWidth: 900, minHeight: 600)
         .tint(FazmColors.purplePrimary)
-        // Hard paywall at sign-in: the moment auth flips to signed-in, refresh
-        // subscription status and gate the user before onboarding can start.
-        // Re-runs on every sign-in (also fires once at launch when cached auth
-        // restores isSignedIn = true).
-        .task(id: authState.isSignedIn) {
-            guard authState.isSignedIn else { return }
-            // DeskPilot reaches none of Fazm's hosted services, so there is
-            // nothing here to subscribe to — and no reason to ask the network.
-            if DeskPilotMode.isOffline {
-                log("DesktopHomeView: DeskPilot mode — skipping the subscription gate")
-            } else {
-                log("DesktopHomeView: sign-in detected — checking subscription")
-                await SubscriptionService.shared.refreshStatus()
-                if SubscriptionService.shared.shouldShowPaywall() {
-                    log("DesktopHomeView: sign-in gate — no active subscription, showing paywall")
-                    viewModelContainer.chatProvider.showPaywall = true
-                    PaywallWindowController.shared.show(chatProvider: viewModelContainer.chatProvider)
-                }
-            }
-        }
+        // A `.task(id: authState.isSignedIn)` used to sit here running the hard
+        // subscription gate the moment auth flipped to signed-in. Both halves
+        // are gone: there is no sign-in to key the task on, and the Stripe
+        // status endpoint it called needed an ID token no local user can mint.
         // Observe ChatProvider flags
         .onReceive(viewModelContainer.chatProvider.$needsBrowserExtensionSetup) { needs in
             if needs {
