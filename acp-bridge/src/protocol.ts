@@ -1,6 +1,10 @@
 // JSON lines protocol between Swift app and Node.js ACP bridge
 // Extended from agent-bridge protocol with authentication message types
 
+// DeskPilot offline mode routes every session through one Hermes ACP process.
+export type { ACPRoute } from "./hermes-route.js";
+export type { StdioProviderConfig } from "./stdio-provider.js";
+
 // === Swift → Bridge (stdin) ===
 
 export interface QueryAttachment {
