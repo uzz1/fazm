@@ -2140,9 +2140,6 @@ class FloatingControlBarManager {
             PostOnboardingTutorialManager.shared.showIfNeeded(barState: barState)
         }
 
-        // Browser profile migration popup for existing users
-        BrowserProfileMigrationManager.shared.showIfNeeded()
-
         // Auto-focus input if AI conversation is open
         if let window = window, window.state.streaming.showingAIConversation && !window.state.streaming.showingAIResponse {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

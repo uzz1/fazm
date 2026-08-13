@@ -2428,8 +2428,6 @@ struct RunningToolLabel: View {
         case "execute_sql": return "database query"
         case "speak_response": return "voice response"
         case "ask_followup": return "follow-up prompt"
-        case "query_browser_profile", "extract_browser_profile": return "browser profile"
-        case "edit_browser_profile": return "browser profile edit"
         case "save_observer_card": return "saving card"
         case "set_user_preferences": return "preferences update"
         default:

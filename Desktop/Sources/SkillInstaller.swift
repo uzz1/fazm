@@ -17,7 +17,6 @@ enum SkillInstaller {
         "deep-research": "Research & Planning", "travel-planner": "Research & Planning", "web-scraping": "Research & Planning",
         "social-autoposter": "Social Media", "social-autoposter-setup": "Social Media",
         "find-skills": "Discovery",
-        "ai-browser-profile": "Personal",
         "google-workspace-setup": "Productivity",
         "telegram": "Productivity",
     ]

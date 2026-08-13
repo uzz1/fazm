@@ -1464,8 +1464,6 @@ struct OnboardingToolIndicator: View {
 
     private var displayText: String {
         switch cleanToolName {
-        case "extract_browser_profile":
-            return status == .running ? "Reading your browser data..." : "Browser profile ready"
         case "scan_files", "start_file_scan":
             return status == .running ? "Scanning your files..." : "Files scanned"
         case "check_permission_status":
