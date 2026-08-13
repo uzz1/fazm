@@ -38,3 +38,23 @@ export function offlineProviderConfig(
 ): StdioProviderConfig {
   return hermesConfig(environment as NodeJS.ProcessEnv);
 }
+
+/** The four adapters index.ts can own a session on. */
+export type SessionProviderID = "hermes" | "claude" | "codex" | "gemini";
+
+/**
+ * Pick the adapter that owns a turn.
+ *
+ * Offline, the answer is always Hermes. The model id cannot be consulted:
+ * Swift keeps its own picker list and still reports claude/codex/gemini ids in
+ * a DeskPilot install, so letting the model decide would send offline turns to
+ * a hosted provider — exactly the failure this replaces. `hostedProvider` is
+ * whatever the model-based branch in index.ts chose, and it only survives when
+ * offline mode is off.
+ */
+export function selectSessionProvider(
+  hostedProvider: "claude" | "codex" | "gemini",
+  environment: Environment = process.env,
+): SessionProviderID {
+  return deskpilotOffline(environment) ? "hermes" : hostedProvider;
+}

@@ -5,6 +5,7 @@ import {
   deskpilotOffline,
   offlineMcpServers,
   offlineProviderConfig,
+  selectSessionProvider,
 } from "../dist/deskpilot-mode.js";
 
 test("offline mode is opt-in and exact", () => {
@@ -33,6 +34,23 @@ test("offline provider is Hermes alone, with no hosted-provider fallback", () =>
   });
   assert.equal(config.id, "hermes");
   assert.deepEqual(config.args, ["-m", "acp_adapter"]);
+});
+
+test("offline routes every session to Hermes regardless of the selected model", () => {
+  // The model picker still reports claude/codex/gemini ids offline (Swift keeps
+  // its own list), so the model must never be allowed to pick the provider.
+  const offline = { DESKPILOT_OFFLINE: "1" };
+  for (const hosted of ["claude", "codex", "gemini"]) {
+    assert.equal(selectSessionProvider(hosted, offline), "hermes");
+  }
+});
+
+test("online keeps the hosted provider the model selected", () => {
+  const online = { DESKPILOT_OFFLINE: "0" };
+  assert.equal(selectSessionProvider("claude", online), "claude");
+  assert.equal(selectSessionProvider("codex", online), "codex");
+  assert.equal(selectSessionProvider("gemini", online), "gemini");
+  assert.equal(selectSessionProvider("gemini", {}), "gemini");
 });
 
 test("offline provider refuses to be built outside offline mode", () => {

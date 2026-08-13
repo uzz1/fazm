@@ -39,7 +39,17 @@ import type {
   WarmupMessage,
   AuthMethod,
 } from "./protocol.js";
-import { deskpilotOffline, offlineMcpServers } from "./deskpilot-mode.js";
+import { deskpilotOffline, offlineMcpServers, offlineProviderConfig, selectSessionProvider } from "./deskpilot-mode.js";
+import { GenericACPProvider } from "./stdio-provider.js";
+import { HermesRouteStore } from "./hermes-route.js";
+import {
+  attachHermesDisconnectRecovery,
+  handleHermesQuery,
+  dropHermesSession,
+  interruptHermesSession,
+  interruptAllHermesSessions,
+  hermesSessionCount,
+} from "./hermes-query.js";
 import { startOAuthFlow, OAuthTokenExchangeError, readStoredCredentials, type OAuthFlowHandle } from "./oauth-flow.js";
 import { startCodexOAuthFlow, type CodexOAuthFlowHandle } from "./codex-oauth-flow.js";
 import { CodexProvider } from "./codex-provider.js";
@@ -1208,6 +1218,52 @@ function killAcpProcessTree(): void {
   acpProcess = null;
 }
 
+// --- Hermes provider (DeskPilot offline mode) ---
+// The only agent process an offline install talks to. Built lazily on the
+// first offline turn so a hosted (online) bridge never constructs it, and so a
+// misconfigured DeskPilot environment fails on a visible turn — with the exact
+// missing-variable error from hermesConfig — instead of at import time where
+// the message would be lost before Swift is listening.
+let hermesProvider: GenericACPProvider | null = null;
+let hermesRoutes: HermesRouteStore | null = null;
+
+function getHermesRoutes(): HermesRouteStore {
+  if (!hermesRoutes) {
+    // Sits beside the policy socket's own state under HERMES_HOME so the route
+    // file shares that directory's ownership and 0700 mode.
+    const home = process.env.HERMES_HOME ?? join(homedir(), ".deskpilot", "hermes");
+    hermesRoutes = new HermesRouteStore(join(home, "acp-routes.json"));
+  }
+  return hermesRoutes;
+}
+
+function getHermesProvider(): GenericACPProvider {
+  if (!hermesProvider) {
+    const provider = new GenericACPProvider(offlineProviderConfig());
+    provider.on("stderr", (chunk: string) => logErr(`[hermes] ${String(chunk).trimEnd()}`));
+    provider.on("protocolError", (err: Error) => logErr(`[hermes] protocol error: ${err.message}`));
+    provider.on("permissionExpired", (handle: { permissionRequestID: string }) =>
+      logErr(`[hermes] permission ${handle.permissionRequestID} expired unanswered`));
+    provider.on("disconnect", (event: { terminal: boolean }) =>
+      logErr(`[hermes] transport lost (terminal=${event.terminal})`));
+    attachHermesDisconnectRecovery(provider, getHermesRoutes(), logErr);
+    hermesProvider = provider;
+  }
+  return hermesProvider;
+}
+
+/** Everything handleHermesQuery needs, assembled in one place. */
+function hermesQueryDeps() {
+  return {
+    logErr,
+    send,
+    sendWithSession,
+    getProvider: getHermesProvider,
+    routes: getHermesRoutes(),
+    registerSession,
+  };
+}
+
 // --- Codex provider (Phase 2.1) ---
 // Lazily instantiated; only spawned when first needed (probe or codex-prefixed
 // model query). Until then, zero impact on the existing Claude-only flow.
@@ -1244,6 +1300,13 @@ function readCodexAuthMode(): "chatgpt" | "api_key" | "none" {
 }
 
 async function handleCodexInitProbe(): Promise<void> {
+  // Offline: never construct the codex-acp provider. The probe is what would
+  // otherwise spawn it at startup, log the user into ChatGPT, and put a second
+  // agent process behind the same picker.
+  if (deskpilotOffline()) {
+    send({ type: "codex_probe_result", ok: false, authMode: "none", error: "DeskPilot offline mode: Hermes is the only agent." });
+    return;
+  }
   try {
     const provider = getCodexProvider();
     provider.start();
@@ -1324,6 +1387,10 @@ async function handleCodexLogout(): Promise<void> {
 let geminiProvider: GeminiProvider | null = null;
 
 function isGeminiEnabled(): boolean {
+  // Offline installs have no hosted provider at all: keeping this false is what
+  // stops getGeminiProvider from ever spawning gemini-cli, and what makes the
+  // probe report "disabled" instead of reaching for a Google account.
+  if (deskpilotOffline()) return false;
   const v = process.env.FAZM_GEMINI_ENABLED;
   return v === "true" || v === "1";
 }
@@ -1886,7 +1953,7 @@ function startScreenshotResizeWatcher(): void {
 /** Which adapter owns this session — needed so cross-provider switches don't
  *  call session/set_model on the wrong SDK (which returns -32603 "Session not
  *  found" because each adapter keeps its own sessions map). */
-type SessionProvider = "claude" | "codex" | "gemini";
+type SessionProvider = "hermes" | "claude" | "codex" | "gemini";
 const sessions = new Map<string, { sessionId: string; cwd: string; model?: string; uncommitted?: boolean; provider: SessionProvider }>();
 /** Reverse map: ACP sessionId → sessionKey, for tagging outbound messages with sessionKey */
 const sessionIdToKey = new Map<string, string>();
@@ -2315,6 +2382,13 @@ function sendAuthCancelledResult(sessionId: string, err: unknown): void {
  * Idempotent: if a flow is already running, returns the same promise.
  */
 async function startAuthFlow(triggerSessionKey?: string): Promise<void> {
+  // There is no hosted account to authenticate against offline. Returning here
+  // is what keeps a stray Claude-path error from opening a browser at
+  // console.anthropic.com on a machine that is meant to have no network path.
+  if (deskpilotOffline()) {
+    logErr("DeskPilot offline mode: skipping Claude OAuth flow (Hermes needs no hosted account)");
+    return;
+  }
   if (activeAuthPromise) {
     logErr("Auth flow already in progress, waiting for it...");
     // Re-emit auth_required for the new trigger session. A flow may already be
@@ -3394,6 +3468,16 @@ function migrateJsonlForCwdChange(sessionId: string, oldCwd: string, newCwd: str
 }
 
 async function preWarmSession(cwd?: string, sessionConfigs?: WarmupSessionConfig[], models?: string[], stagger?: boolean): Promise<WarmupResult> {
+  // Offline there is nothing to pre-warm: warmup exists to pay session/new and
+  // MCP spin-up ahead of the visible turn, and Hermes registers no MCP servers
+  // and creates its session lazily in handleHermesQuery. Reporting the keys as
+  // completed (rather than failed) is accurate — the first query will have a
+  // session — and keeps Swift's warmup_complete from showing a false failure.
+  if (deskpilotOffline()) {
+    const keys = (sessionConfigs ?? []).map((s) => s.key);
+    logErr(`DeskPilot offline mode: skipping pre-warm for ${keys.length} session(s); Hermes sessions are created on first query`);
+    return { completedKeys: keys, failedSessions: [] };
+  }
   const warmCwd = cwd || DEFAULT_CWD;
   try { mkdirSync(warmCwd, { recursive: true }); } catch {}
 
@@ -3646,11 +3730,13 @@ async function handleQuery(msg: QueryMessage, _retryDepth = 0): Promise<void> {
   // Without this the previous-provider session leaks (its handler stays in
   // the private map, the SDK subprocess keeps the session alive), which over
   // time accumulates dead sessions on long-lived bridges.
-  const incomingProvider: SessionProvider = isCodexModel(msg.model)
-    ? "codex"
-    : isGeminiModel(msg.model)
-      ? "gemini"
-      : "claude";
+  // Offline, the model id must not choose the provider: Swift still reports
+  // claude/codex/gemini ids from its own picker, so selectSessionProvider
+  // overrides the model-derived answer with "hermes" whenever DESKPILOT_OFFLINE
+  // is set. Online it is the identity function.
+  const incomingProvider: SessionProvider = selectSessionProvider(
+    isCodexModel(msg.model) ? "codex" : isGeminiModel(msg.model) ? "gemini" : "claude",
+  );
   const _switchKey = msg.sessionKey ?? (msg.model || DEFAULT_MODEL);
   const _switchExisting = sessions.get(_switchKey);
   if (_switchExisting && _switchExisting.provider !== incomingProvider && _switchExisting.provider !== "claude") {
@@ -3668,6 +3754,10 @@ async function handleQuery(msg: QueryMessage, _retryDepth = 0): Promise<void> {
       } else if (_switchExisting.provider === "gemini") {
         const gprov = getGeminiProvider();
         if (gprov) dropGeminiSession(_switchKey, gprov);
+      } else if (_switchExisting.provider === "hermes") {
+        // Only reachable when offline mode is turned off mid-process (dev), but
+        // leaving the stale entry would keep routing this key at a dead agent.
+        dropHermesSession(_switchKey);
       }
     } catch (cleanupErr) {
       logErr(`[PROVIDER-SWITCH] cleanup of ${_switchExisting.provider} session failed (continuing): ${cleanupErr}`);
@@ -3682,6 +3772,14 @@ async function handleQuery(msg: QueryMessage, _retryDepth = 0): Promise<void> {
       logErr(`[PROVIDER-SWITCH] session/close on claude session ${_switchExisting.sessionId.slice(0, 8)} failed: ${err}`);
     });
     unregisterSession(_switchKey);
+  }
+
+  // DeskPilot offline: every turn goes to Hermes, whatever the model id says.
+  // This must precede the hosted branches and initializeAcp() below — reaching
+  // any of them would send an offline turn to a network provider.
+  if (incomingProvider === "hermes") {
+    await handleHermesQuery(msg, hermesQueryDeps());
+    return;
   }
 
   // Phase 2.3: route Codex models to the codex-acp adapter. The Claude path
@@ -6361,6 +6459,14 @@ async function main(): Promise<void> {
     // One agent process, no bundled downstream execution. Resolving paths for
     // servers that will never be registered would only invite drift.
     logErr("DeskPilot offline mode: Hermes is the only agent; no bundled MCP servers registered");
+    // Load persisted routes before the first query so a relaunch resumes the
+    // conversation Hermes already has, instead of silently starting a new one.
+    try {
+      await getHermesRoutes().load();
+      logErr("DeskPilot offline mode: Hermes ACP routes loaded");
+    } catch (err) {
+      logErr(`DeskPilot offline mode: route load failed (starting fresh): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Log MCP server versions at startup for diagnostics
@@ -6379,7 +6485,9 @@ async function main(): Promise<void> {
   // mid-flight has no way to identify whether the in-memory token in this
   // process was the one the rotator swapped in, or a stale one from the
   // pre-rotation account. See 2026-05-20 rotation-disconnect investigation.
-  try {
+  // Skipped offline: there is no hosted Claude account, so this would only
+  // prompt the keychain for a credential DeskPilot never uses.
+  if (!deskpilotOffline()) try {
     const creds = readStoredCredentials();
     if (creds) {
       const ageSec = creds.storedAt ? Math.round((Date.now() - new Date(creds.storedAt).getTime()) / 1000) : null;
@@ -6396,7 +6504,7 @@ async function main(): Promise<void> {
   // swaps the keychain entry while the bridge is running, this is the only way
   // (short of a fresh OAuth flow) to see that the bridge's view of "the current
   // account" has shifted. Cheap: one security CLI call every 5 minutes.
-  setInterval(() => {
+  if (!deskpilotOffline()) setInterval(() => {
     try {
       const creds = readStoredCredentials();
       if (creds) {
@@ -6438,8 +6546,16 @@ async function main(): Promise<void> {
   startScreenshotResizeWatcher();
 
   // 1. Start Unix socket for fazm-tools relay
-  fazmToolsPipePath = await startFazmToolsRelay();
-  logErr("fazm-tools relay started");
+  // Skipped offline. The relay exists so bundled MCP servers can call back into
+  // the bridge; offline none are registered (buildMcpServers returns []), and
+  // an open socket that only an unpoliced second execution path could use is
+  // exactly what DeskPilot mode is meant to remove.
+  if (deskpilotOffline()) {
+    logErr("DeskPilot offline mode: fazm-tools relay not started");
+  } else {
+    fazmToolsPipePath = await startFazmToolsRelay();
+    logErr("fazm-tools relay started");
+  }
 
   // 2. Start the ACP subprocess
   startAcpProcess();
@@ -6674,6 +6790,10 @@ async function main(): Promise<void> {
             // SAME upstream session via session/prompt (no resume call, no
             // priorContext replay).
             logErr(`Session ${ctx.sessionId} cancelled (cached entry kept; next prompt continues in same session)`);
+          } else if (hermesProvider && interruptHermesSession(targetKey, hermesProvider)) {
+            // Offline: session/cancel ends the turn, not the session, so the
+            // cached entry stays and the next prompt continues the same chat.
+            logErr(`Interrupt requested for hermes session key=${targetKey} (turn cancelled; session kept)`);
           } else if (codexProvider && interruptCodexSession(targetKey, codexProvider)) {
             // Same key may be a codex session — interrupt and drop it.
             logErr(`Interrupt requested for codex session key=${targetKey} (cancelled + dropped)`);
@@ -6704,6 +6824,10 @@ async function main(): Promise<void> {
             logErr(`Session ${activeSessionId} cancelled (legacy fallback)`);
           }
           // Cancel any in-flight codex sessions too.
+          if (hermesProvider && hermesSessionCount() > 0) {
+            const n = interruptAllHermesSessions(hermesProvider);
+            logErr(`Interrupted ${n} hermes session(s)`);
+          }
           if (codexProvider && codexSessionCount() > 0) {
             const n = interruptAllCodexSessions(codexProvider);
             logErr(`Interrupted ${n} codex session(s)`);
@@ -6898,6 +7022,9 @@ async function main(): Promise<void> {
         const key = (msg as any).sessionKey;
         // Drop any codex or gemini session under this key first — the same
         // key can map to any provider depending on the user's selected model.
+        if (key) {
+          dropHermesSession(key);
+        }
         if (key && codexProvider) {
           dropCodexSession(key, codexProvider);
         }
