@@ -2359,6 +2359,67 @@ actor ACPBridge {
   /// scheduler can spawn cron-runner.mjs (which spawns its own headless bridge) with
   /// identical auth/MCP env — otherwise the headless routine bridge silently drifts from
   /// the interactive one whenever a new var is added here.
+  /// The six variables `hermesConfig()` requires for DeskPilot offline mode.
+  ///
+  /// Returns nil unless *every* value resolves. A partial set makes the bridge
+  /// throw at launch, and a missing `DESKPILOT_OFFLINE` silently routes the turn
+  /// to a hosted provider; refusing to enable the mode is the safer failure.
+  ///
+  /// Off unless `deskpilotOfflineEnabled` is set, so a stock Fazm build is
+  /// unaffected:
+  ///   defaults write com.fazm.desktop-dev deskpilotOfflineEnabled -bool true
+  ///   defaults write com.fazm.desktop-dev deskpilotHermesPython /abs/path/to/python
+  static func deskpilotEnvironment(
+    defaults: UserDefaults = .standard,
+    fileManager: FileManager = .default
+  ) -> [String: String]? {
+    guard defaults.bool(forKey: "deskpilotOfflineEnabled") else { return nil }
+
+    let home = fileManager.homeDirectoryForCurrentUser
+    let runDirectory = home.appendingPathComponent(".deskpilot/run")
+    let hermesHome = home.appendingPathComponent(".deskpilot/hermes")
+
+    // The interpreter that runs `python -m acp_adapter`. There is no safe
+    // default to guess, so an unset or non-executable path disables the mode
+    // rather than launching some other Python.
+    guard let python = defaults.string(forKey: "deskpilotHermesPython"),
+          !python.isEmpty,
+          fileManager.isExecutableFile(atPath: python)
+    else {
+      fputs("[deskpilot] offline mode requested but deskpilotHermesPython is unset or not executable\n", stderr)
+      return nil
+    }
+
+    // Read from a private file rather than a default or a literal: this value
+    // must never reach a process argument, a plist, or a log.
+    let keyURL = runDirectory.appendingPathComponent("lm-api-key")
+    guard let keyData = try? Data(contentsOf: keyURL),
+          let apiKey = String(data: keyData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+          !apiKey.isEmpty
+    else {
+      // The absence is logged; the value never is.
+      fputs("[deskpilot] offline mode requested but no key at ~/.deskpilot/run/lm-api-key\n", stderr)
+      return nil
+    }
+
+    // HERMES_HOME must exist before Hermes starts; nothing else creates it.
+    try? fileManager.createDirectory(
+      at: hermesHome,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+
+    return [
+      "DESKPILOT_OFFLINE": "1",
+      "DESKPILOT_HERMES_PYTHON": python,
+      "HERMES_HOME": hermesHome.path,
+      "DESKPILOT_POLICY_SOCKET": runDirectory.appendingPathComponent("policy.sock").path,
+      "DESKPILOT_STATUS_SOCKET": runDirectory.appendingPathComponent("hermes-status.sock").path,
+      "LM_API_KEY": apiKey,
+    ]
+  }
+
   static func makeBridgeEnvironment(mode: BridgeMode, nodePath: String) async -> [String: String] {
     var env = ProcessInfo.processInfo.environment
     env["NODE_NO_WARNINGS"] = "1"
@@ -2386,6 +2447,13 @@ actor ACPBridge {
     // its `/tmp/fazm-bridge-state.json` dump so dev's and prod's bridges
     // don't overwrite each other's state when both apps are running.
     env["FAZM_BUNDLE_SCOPE"] = AppPaths.bundleScope
+
+    // DeskPilot offline mode. Absent these, hermesConfig() throws "DeskPilot
+    // Hermes environment is incomplete" and the bridge falls back to a hosted
+    // provider — which is the failure this whole mode exists to prevent.
+    if let deskpilot = deskpilotEnvironment() {
+      env.merge(deskpilot) { _, new in new }
+    }
 
     // Browser automation mode: "extension" (Playwright + Chrome extension, default)
     // or "managed" (Fazm-bundled browser-harness driving its own Chrome). The two
