@@ -96,10 +96,6 @@ struct SettingsSearchItem: Identifiable {
         SettingsSearchItem(name: "Subscription", subtitle: "Manage your Fazm Pro subscription or free trial", keywords: ["subscription", "pro", "upgrade", "trial", "plan", "billing", "payment"], section: .about, advancedSubsection: nil, icon: "checkmark.seal.fill", settingId: "about.subscription"),
         SettingsSearchItem(name: "Referrals", subtitle: "Refer friends and earn free months of Pro", keywords: ["referral", "refer", "invite", "friend", "credit", "free month", "share"], section: .about, advancedSubsection: nil, icon: "person.2.fill", settingId: "about.referral"),
         SettingsSearchItem(name: "Version Info", subtitle: "Current app version and build number", keywords: ["version", "build", "app version", "build number"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.version"),
-        SettingsSearchItem(name: "Software Updates", subtitle: "Check for and manage app updates", keywords: ["update", "auto update", "sparkle", "version", "check for updates", "check now"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.updates"),
-        SettingsSearchItem(name: "Automatic Updates", subtitle: "Check for updates automatically in the background", keywords: ["auto check", "background updates", "check automatically"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.autoupdates"),
-        SettingsSearchItem(name: "Auto-Install Updates", subtitle: "Automatically download and install updates when available", keywords: ["auto install", "automatic install", "download updates", "install updates"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.autoinstall"),
-        SettingsSearchItem(name: "Update Channel", subtitle: "Choose between beta and staging update channels", keywords: ["channel", "beta", "staging", "release channel"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.channel"),
         SettingsSearchItem(name: "Report an Issue", subtitle: "Help us improve Fazm", keywords: ["bug", "feedback", "report", "issue"], section: .about, advancedSubsection: nil, icon: "info.circle", settingId: "about.reportissue"),
     ]
 }
@@ -111,28 +107,11 @@ struct SettingsSidebar: View {
     @Binding var highlightedSettingId: String?
     @ObservedObject var appState: AppState
 
-    @ObservedObject private var updaterViewModel = UpdaterViewModel.shared
     @ObservedObject private var founderChatService = FounderChatService.shared
     @State private var searchQuery = ""
-    @State private var updateGlowAnimating = false
     @State private var discoveredTasksUnread = 0
     @FocusState private var isSearchFocused: Bool
     @Environment(\.fazmWindowIsVisible) private var windowIsVisible
-
-    // Surfaces the Sparkle 4005 install error state so users can recover after
-    // dismissing the setup guide. Set in UpdaterViewModel when 4005 fires; cleared
-    // (via `hasSuccessfullyInstalledSparkleUpdate`) once an update installs cleanly.
-    @AppStorage("hasSeenAppManagementError") private var hasSeenAppManagementError: Bool = false
-    @AppStorage("hasSuccessfullyInstalledSparkleUpdate") private var hasInstalledSparkleUpdate: Bool = false
-    // Dismissed = user clicked the X. We still render the widget but grayed out,
-    // so the issue stays visible (still tappable) without nagging them in red.
-    // Cleared when a fresh 4005 error fires (UpdaterViewModel) and when an
-    // update installs successfully.
-    @AppStorage("appManagementWarningDismissed") private var appManagementWarningDismissed: Bool = false
-
-    private var showAppManagementWarning: Bool {
-        hasSeenAppManagementError && !hasInstalledSparkleUpdate
-    }
 
     private let unreadRefreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
@@ -218,21 +197,6 @@ struct SettingsSidebar: View {
 
             Spacer()
 
-            // App Management permission warning (Sparkle 4005 recovery)
-            if showAppManagementWarning {
-                appManagementWarningWidget
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, updaterViewModel.updateAvailable ? 8 : 16)
-                    .transition(.opacity)
-            }
-
-            // Update available widget
-            if updaterViewModel.updateAvailable {
-                updateAvailableWidget
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 16)
-                    .transition(.opacity)
-            }
         }
         .frame(width: expandedWidth)
         .background(FazmColors.backgroundPrimary)
@@ -248,161 +212,6 @@ struct SettingsSidebar: View {
             let count = await DiscoveredTasksStore.unreadCount()
             await MainActor.run { discoveredTasksUnread = count }
         }
-    }
-
-    // MARK: - App Management Warning Widget
-    // Shown when a Sparkle 4005 install error occurred. Tapping the body
-    // reopens the recovery guide. The X button dismisses the warning into a
-    // grayed-out state so it stays visible (still tappable) without nagging
-    // in red. Auto-hides only after an update installs successfully.
-    private var appManagementWarningWidget: some View {
-        let dismissed = appManagementWarningDismissed
-        let accent: Color = dismissed ? FazmColors.textTertiary : .red
-        let titleColor: Color = dismissed ? FazmColors.textSecondary : FazmColors.textPrimary
-        let subtitleColor: Color = dismissed ? FazmColors.textTertiary : FazmColors.textSecondary
-        let strokeOpacity: Double = dismissed ? 0.18 : 0.35
-
-        return HStack(spacing: 12) {
-            Button(action: {
-                let version = updaterViewModel.availableVersion.isEmpty
-                    ? Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-                    : updaterViewModel.availableVersion
-                AppManagementSetupWindowController.shared.show(
-                    version: version,
-                    onDone: {
-                        UserDefaults.standard.set(true, forKey: "hasSuccessfullyInstalledSparkleUpdate")
-                        UserDefaults.standard.set(false, forKey: "appManagementWarningDismissed")
-                        UpdaterViewModel.shared.checkForUpdatesInBackground()
-                    },
-                    onDismiss: { /* keep widget visible until permission granted */ }
-                )
-            }) {
-                HStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .scaledFont(size: 17)
-                        .foregroundColor(accent)
-                        .frame(width: iconWidth)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Auto-updates blocked")
-                            .scaledFont(size: 13, weight: .semibold)
-                            .foregroundColor(titleColor)
-
-                        Text("App Management permission needed")
-                            .scaledFont(size: 11)
-                            .foregroundColor(subtitleColor)
-                    }
-
-                    Spacer(minLength: 4)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if !dismissed {
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appManagementWarningDismissed = true
-                    }
-                }) {
-                    Image(systemName: "xmark")
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundColor(FazmColors.textTertiary)
-                        .frame(width: 18, height: 18)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Dismiss (still accessible, will gray out)")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 11)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(FazmColors.backgroundTertiary)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(accent.opacity(strokeOpacity), lineWidth: 1)
-                )
-        )
-        .opacity(dismissed ? 0.6 : 1.0)
-    }
-
-    // MARK: - Update Available Widget
-    private var updateAvailableWidget: some View {
-        Button(action: {
-            updaterViewModel.checkForUpdates()
-        }) {
-            HStack(spacing: 12) {
-                if updaterViewModel.updateSessionInProgress {
-                    ProgressView()
-                        .controlSize(.small)
-                        .colorScheme(.dark)
-                        .frame(width: iconWidth)
-                } else {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .scaledFont(size: 17)
-                        .foregroundColor(.white)
-                        .frame(width: iconWidth)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(updaterViewModel.updateSessionInProgress ? "Updating..." : "Update Available")
-                        .scaledFont(size: 13, weight: .semibold)
-                        .foregroundColor(.white)
-
-                    if !updaterViewModel.availableVersion.isEmpty {
-                        Text("v\(updaterViewModel.availableVersion)")
-                            .scaledFont(size: 11)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                }
-
-                Spacer()
-
-                if !updaterViewModel.updateSessionInProgress {
-                    Image(systemName: "chevron.right")
-                        .scaledFont(size: 12)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(FazmColors.purplePrimary)
-            )
-            .shadow(color: FazmColors.purplePrimary.opacity(updateGlowAnimating ? 0.7 : 0.3), radius: 8)
-        }
-        .buttonStyle(.plain)
-        .disabled(updaterViewModel.updateSessionInProgress)
-        .onAppear {
-            startGlowIfVisible()
-        }
-        .onChange(of: windowIsVisible) { _, visible in
-            // Pause the repeatForever pulse when the window is occluded —
-            // SwiftUI's animation would otherwise keep the AttributeGraph
-            // dirty every frame and force AppKit to re-layout (CPU burn).
-            if visible {
-                startGlowIfVisible()
-            } else {
-                withAnimation(.default) {
-                    updateGlowAnimating = false
-                }
-            }
-        }
-    }
-
-    private func startGlowIfVisible() {
-        // BISECT 2026-05-28: temporarily nopped to measure the main-thread
-        // storm contribution. The legacy `withAnimation(.repeatForever)`
-        // pattern leaks an animation transaction across the entire view
-        // tree forever, which keeps the SwiftUI display cycle dirty 60 Hz
-        // even when nothing else in the sidebar is changing.
-        // Restore as a value-based `.animation(...)` modifier (per
-        // FloatingControlBarView.swift:259) once we confirm it's a
-        // contributor.
-        return
     }
 
     private var searchField: some View {

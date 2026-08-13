@@ -21,7 +21,7 @@ private func appendToLogFile(_ line: String) {
 }
 
 /// Append data to the log file synchronously (blocks caller until written).
-/// Use for critical events that must survive imminent app termination (e.g. Sparkle updates).
+/// Use for critical events that must survive imminent app termination.
 private func appendToLogFileSync(_ line: String) {
     guard let data = (line + "\n").data(using: .utf8) else { return }
     logQueue.sync {

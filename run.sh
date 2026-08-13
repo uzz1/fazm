@@ -242,22 +242,14 @@ fi
 
 substep "Adding rpath for Frameworks"
 # Idempotent — install_name_tool errors if rpath already exists. Hard-verify at
-# the end: missing rpath means launch crash with "Library not loaded: @rpath/Sparkle.framework"
+# the end: missing rpath means launch crash on any @rpath-loaded framework
 if ! otool -l "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" | grep -q "@executable_path/../Frameworks"; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 fi
 otool -l "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" | grep -q "@executable_path/../Frameworks" || {
-    echo "FATAL: Sparkle rpath missing — app would crash at launch"
+    echo "FATAL: Frameworks rpath missing — app would crash at launch"
     exit 1
 }
-
-# Copy Sparkle framework
-SPARKLE_FRAMEWORK="Desktop/.build/arm64-apple-macosx/debug/Sparkle.framework"
-if [ -d "$SPARKLE_FRAMEWORK" ]; then
-    substep "Copying Sparkle framework ($(du -sh "$SPARKLE_FRAMEWORK" 2>/dev/null | cut -f1))"
-    rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-    cp -R "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
-fi
 
 substep "Copying Info.plist"
 cp -f Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
@@ -270,9 +262,7 @@ cp -f Desktop/Info.plist "$APP_BUNDLE/Contents/Info.plist"
 # Stamp a dev marker so analytics/About don't show the placeholder "1.0" from Info.plist.
 # Keep the marketing string stable so OnboardingChatPersistence's version-change check
 # doesn't blow away mid-onboarding state on every rebuild. Use a build-time timestamp
-# for CFBundleVersion so Sparkle never considers a prod release "newer" than dev —
-# without this, clicking "Install Update" inside Fazm Dev would clobber the dev bundle
-# with the prod payload.
+# for CFBundleVersion so dev and prod builds never collide on version ordering.
 DEV_BUILD_NUMBER=$(date +%s)
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.0.0-dev" "$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $DEV_BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"
@@ -644,10 +634,6 @@ fi
 
 if [ -n "$SIGN_IDENTITY" ]; then
     substep "Using identity: $SIGN_IDENTITY"
-    if [ -d "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" ]; then
-        substep "Signing Sparkle framework"
-        codesign --force --options runtime --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-    fi
     # Sign the bundled ffmpeg binary
     FFMPEG_BIN="$APP_BUNDLE/Contents/Resources/Fazm_Fazm.bundle/ffmpeg"
     if [ -f "$FFMPEG_BIN" ]; then

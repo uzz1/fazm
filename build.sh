@@ -116,23 +116,9 @@ if ! otool -l "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" | grep -q "@executable_p
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 fi
 otool -l "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME" | grep -q "@executable_path/../Frameworks" || {
-    echo "FATAL: Sparkle rpath missing — app would crash at launch"
+    echo "FATAL: Frameworks rpath missing — app would crash at launch"
     exit 1
 }
-
-# Copy Sparkle framework
-mkdir -p "$APP_BUNDLE/Contents/Frameworks"
-SPARKLE_FRAMEWORK="Desktop/.build/arm64-apple-macosx/release/Sparkle.framework"
-if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
-    SPARKLE_FRAMEWORK="Desktop/.build/x86_64-apple-macosx/release/Sparkle.framework"
-fi
-if [ -d "$SPARKLE_FRAMEWORK" ]; then
-    ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
-    echo "Copied Sparkle framework"
-else
-    echo "ERROR: Sparkle.framework not found — app will crash at launch"
-    exit 1
-fi
 
 # Build and bundle mcp-server-macos-use
 echo "Building mcp-server-macos-use..."

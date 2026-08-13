@@ -752,7 +752,7 @@ struct ChatPromptBuilder {
     /// Env-prefixed command for the bundled Python 3.12 interpreter.
     /// PYTHONDONTWRITEBYTECODE + PYTHONPYCACHEPREFIX redirect Python's bytecode cache out of
     /// the .app bundle; without them, `__pycache__/*.pyc` files written next to imported sources
-    /// invalidate the bundle's code-signing seal (codesign verify=FAILED, breaks Sparkle).
+    /// invalidate the bundle's code-signing seal (codesign verify=FAILED).
     private static var bundledPythonPath: String {
         // Universal .dmg artifacts ship `.venv-arm64` + `.venv-x86_64` side by
         // side; only per-arch ZIP slices get the thinned `.venv/`. See

@@ -1,6 +1,5 @@
 import SwiftUI
 import Sentry
-import Sparkle
 import FirebaseCore
 
 // MARK: - Sentry Noise Guard
@@ -199,7 +198,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Crash-loop detection must run before ANY other init.
         // If 3+ rapid crashes are detected, this will restore the previous version and terminate.
-        UpdateRollbackManager.checkForCrashLoop()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -274,7 +272,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Apply squircle mask with proper margins because NSApp.applicationIconImage
         // renders the raw image without macOS auto-masking.
         // Do NOT call NSWorkspace.setIcon(forFile:) — it writes a resource fork onto
-        // the .app bundle, which breaks the code signature and prevents Sparkle
+        // the .app bundle, which breaks the code signature and prevents
         // auto-updates from working ("An error occurred while running the updater").
         if let iconURL = Bundle.resourceBundle.url(forResource: "fazm_app_icon", withExtension: "png"),
            let icon = NSImage(contentsOf: iconURL) {
@@ -301,12 +299,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // One-time icon cache reset: forces macOS to pick up the new squircle icon.
         // Without this, users who had the old square icon see it cached indefinitely
-        // in the Dock, notifications, and Sparkle updater.
+        // in the Dock and notifications.
         resetIconCacheIfNeeded()
-
-        // Initialize Sparkle auto-updater early so the 10-minute check timer starts at launch
-        // Without this, the updater only starts when the user opens Settings or clicks "Check for Updates"
-        _ = UpdaterViewModel.shared
 
         // Initialize Sentry for crash reporting and error tracking (including dev builds)
         let isDev = AnalyticsManager.isDevBuild
@@ -620,10 +614,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Mark successful launch — resets the crash-loop counter.
         // Must be at the END of applicationDidFinishLaunching so that crashes during
         // any of the above init still count toward the crash-loop threshold.
-        UpdateRollbackManager.markSuccessfulLaunch()
 
         // If we just rolled back from a bad update, show a notification and track analytics.
-        UpdateRollbackManager.handlePostRollbackIfNeeded()
 
         log("AppDelegate: applicationDidFinishLaunching completed")
     }
@@ -646,12 +638,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Removes Python __pycache__ directories from the bundled google-workspace-mcp venv.
     /// Bytecode files written next to imported sources break the bundle's code-signing seal
     /// (codesign verify=FAILED → "a sealed resource is missing or invalid"), which interferes
-    /// with Sparkle and notarization-aware paths. Runs async on a utility queue so it never
+    /// with notarization-aware paths. Runs async on a utility queue so it never
     /// blocks launch; failures are silent (e.g. no write access to /Applications).
     static func cleanBundledPycaches() {
         // Every bundled Python venv can have runtime-written __pycache__ left over from a
         // pre-fix build. Any one of them breaks the bundle's code-signing seal and the broken
-        // seal survives Sparkle updates, so we must scan ALL of them, not just google-workspace-mcp.
+        // seal survives in-place updates, so we must scan ALL of them, not just google-workspace-mcp.
         // (browser-harness + ai-browser-profile venvs were added to the bundle in e59009f2.)
         let resources = Bundle.main.bundlePath + "/Contents/Resources"
         let venvRoots = [
@@ -931,13 +923,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Check for Updates
-        let updatesItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
-        updatesItem.target = self
-        menu.addItem(updatesItem)
-
-        menu.addItem(NSMenuItem.separator())
-
         // Report Issue
         let reportItem = NSMenuItem(title: "Report Issue...", action: #selector(reportIssue), keyEquivalent: "")
         reportItem.target = self
@@ -993,11 +978,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // be bound yet at cold-boot, so guarantee the floating bar is visible.
             FloatingControlBarManager.shared.show()
         }
-    }
-
-    @MainActor @objc private func checkForUpdates() {
-        AnalyticsManager.shared.menuBarActionClicked(action: "check_updates")
-        UpdaterViewModel.shared.checkForUpdates()
     }
 
     @MainActor @objc private func reportIssue() {
@@ -1399,7 +1379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Log code signature verification and install origin at startup.
     /// Helps diagnose KERN_CODESIGN_ERROR crashes by capturing the signature state
-    /// and whether the app was delivered via Sparkle update or fresh DMG install.
+    /// and whether the app was delivered via in-place update or fresh DMG install.
     private func logCodeSignatureStatus() {
         DispatchQueue.global(qos: .utility).async {
             let appPath = Bundle.main.bundlePath
@@ -1446,7 +1426,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } ?? "unknown"
 
             // 3. Detect install origin
-            let hadSparkleUpdate = UserDefaults.standard.bool(forKey: "hasSuccessfullyInstalledSparkleUpdate")
             let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
             let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
             let previousVersion = UserDefaults.standard.string(forKey: "fazm_previousVersion")
@@ -1457,7 +1436,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             UserDefaults.standard.set(currentVersion, forKey: "fazm_previousVersion")
             UserDefaults.standard.set(currentBuild, forKey: "fazm_previousBuild")
 
-            // Check for quarantine xattr (present on DMG downloads, cleared by Sparkle updates)
+            // Check for quarantine xattr (present on DMG downloads)
             let xattrProcess = Process()
             xattrProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
             xattrProcess.arguments = ["-p", "com.apple.quarantine", appPath]
@@ -1477,10 +1456,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let installMethod: String
             if hasQuarantine {
                 installMethod = "dmg-download"
-            } else if hadSparkleUpdate && isVersionChange {
-                installMethod = "sparkle-update (just updated)"
-            } else if hadSparkleUpdate {
-                installMethod = "sparkle-managed"
+            } else if isVersionChange {
+                installMethod = "in-place-update"
             } else if previousVersion == nil {
                 installMethod = "first-launch"
             } else {
@@ -1500,7 +1477,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let path = String(cString: name)
                     let header = _dyld_get_image_header(i)
                     // Only log non-system images (our app + embedded binaries)
-                    if path.contains("Fazm") || path.contains("fazm") || path.contains("Sparkle") {
+                    if path.contains("Fazm") || path.contains("fazm") {
                         let addr = UInt(bitPattern: header)
                         imageList += " \(path.split(separator: "/").last ?? Substring(path))@\(String(addr, radix: 16))"
                     }

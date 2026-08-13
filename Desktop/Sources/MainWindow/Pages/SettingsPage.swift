@@ -1,5 +1,4 @@
 import SwiftUI
-import Sparkle
 import UniformTypeIdentifiers
 import CoreImage
 
@@ -84,8 +83,6 @@ struct SettingsContentView: View {
     // ChatProvider for browser extension setup
     var chatProvider: ChatProvider? = nil
 
-    // Updater view model
-    @ObservedObject private var updaterViewModel = UpdaterViewModel.shared
 
     // Observe transcription vocabulary so Dictionary section re-renders on add/remove.
     @ObservedObject private var assistantSettings = AssistantSettings.shared
@@ -225,7 +222,6 @@ struct SettingsContentView: View {
 
     @State private var showResetOnboardingAlert: Bool = false
     @State private var showRescanFilesAlert: Bool = false
-    @State private var showChannelPicker: Bool = false
 
     init(
         appState: AppState,
@@ -2279,7 +2275,7 @@ struct SettingsContentView: View {
     // Resolve the Python interpreter inside a bundled MCP directory. Codemagic
     // ships the universal .dmg with `.venv-arm64/` and `.venv-x86_64/` side by
     // side (per-arch wheels) and only renames the surviving one to plain
-    // `.venv/` when slicing into single-arch ZIPs for Sparkle delivery. The
+    // `.venv/` when slicing into single-arch ZIPs for release delivery. The
     // universal artifact installed from the .dmg therefore has NO `.venv/` dir
     // at runtime, which made every `\(mcpDir)/.venv/bin/python3` lookup fail in
     // prod (Settings > Import sessions → "ai-browser-profile not bundled").
@@ -3766,61 +3762,13 @@ struct SettingsContentView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Text("Fazm")
-                                    .scaledFont(size: 18, weight: .bold)
-                                    .foregroundColor(FazmColors.textPrimary)
+                            Text("Fazm")
+                                .scaledFont(size: 18, weight: .bold)
+                                .foregroundColor(FazmColors.textPrimary)
 
-                                if !updaterViewModel.activeChannelLabel.isEmpty {
-                                    Text("(\(updaterViewModel.activeChannelLabel))")
-                                        .scaledFont(size: 13, weight: .medium)
-                                        .foregroundColor(FazmColors.purplePrimary)
-                                }
-                            }
-
-                            Text("Version \(updaterViewModel.currentVersion) (\(updaterViewModel.buildNumber))")
+                            Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
                                 .scaledFont(size: 13)
                                 .foregroundColor(FazmColors.textTertiary)
-                                .onTapGesture(count: 3) {
-                                    // Triple-click to show channel picker popover
-                                    showChannelPicker = true
-                                    logSync("Settings: Channel picker opened via triple-click")
-                                }
-                                .popover(isPresented: $showChannelPicker, arrowEdge: .bottom) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("Update Channel")
-                                            .font(.headline)
-                                            .padding(.bottom, 4)
-                                        ForEach(UpdateChannel.allCases, id: \.self) { channel in
-                                            Button(action: {
-                                                updaterViewModel.updateChannel = channel
-                                                showChannelPicker = false
-                                                logSync("Settings: Channel set to \(channel.rawValue) via popover")
-                                            }) {
-                                                HStack {
-                                                    VStack(alignment: .leading, spacing: 2) {
-                                                        Text(channel.displayName)
-                                                            .scaledFont(size: 13, weight: .medium)
-                                                        Text(channel.description)
-                                                            .scaledFont(size: 11)
-                                                            .foregroundColor(.secondary)
-                                                    }
-                                                    Spacer()
-                                                    if updaterViewModel.updateChannel == channel {
-                                                        Image(systemName: "checkmark")
-                                                            .foregroundColor(FazmColors.purplePrimary)
-                                                    }
-                                                }
-                                                .padding(.vertical, 4)
-                                                .padding(.horizontal, 8)
-                                                .contentShape(Rectangle())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                    .padding(12)
-                                    .frame(width: 220)
-                                }
                         }
 
                         Spacer()
@@ -3835,89 +3783,6 @@ struct SettingsContentView: View {
                     linkRow(title: "Safety & Trust", url: "https://fazm.ai/safety")
                     linkRow(title: "Privacy Policy", url: "https://fazm.ai/privacy")
                     linkRow(title: "Terms of Service", url: "https://fazm.ai/terms")
-                }
-            }
-
-            // Software Updates
-            settingsCard(settingId: "about.updates") {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .scaledFont(size: 16)
-                            .foregroundColor(FazmColors.purplePrimary)
-
-                        Text("Software Updates")
-                            .scaledFont(size: 15, weight: .medium)
-                            .foregroundColor(FazmColors.textPrimary)
-
-                        Spacer()
-
-                        Button("Check Now") {
-                            updaterViewModel.checkForUpdates()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!updaterViewModel.canCheckForUpdates)
-                    }
-
-                    if let lastCheck = updaterViewModel.lastUpdateCheckDate {
-                        Text("Last checked: \(lastCheck, style: .relative) ago")
-                            .scaledFont(size: 12)
-                            .foregroundColor(FazmColors.textTertiary)
-                    }
-
-                    Divider()
-                        .background(FazmColors.backgroundQuaternary)
-
-                    settingRow(title: "Automatic Updates", subtitle: "Check for updates automatically in the background", settingId: "about.autoupdates") {
-                        Toggle("", isOn: $updaterViewModel.automaticallyChecksForUpdates)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                    }
-
-                    if updaterViewModel.automaticallyChecksForUpdates {
-                        settingRow(title: "Auto-Install Updates", subtitle: "Automatically download and install updates when available", settingId: "about.autoinstall") {
-                            Toggle("", isOn: $updaterViewModel.automaticallyDownloadsUpdates)
-                                .toggleStyle(.switch)
-                                .labelsHidden()
-                        }
-                    }
-
-                    Divider()
-                        .background(FazmColors.backgroundQuaternary)
-
-                    settingRow(title: "Update Channel", subtitle: updaterViewModel.updateChannel.description, settingId: "about.channel") {
-                        Picker("", selection: $updaterViewModel.updateChannel) {
-                            ForEach(UpdateChannel.allCases, id: \.self) { channel in
-                                Text(channel.displayName).tag(channel)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .frame(width: 100)
-                    }
-
-                    if UserDefaults.standard.bool(forKey: "hasSeenAppManagementError") {
-                        Divider()
-                            .background(FazmColors.backgroundQuaternary)
-
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                                .scaledFont(size: 12)
-
-                            Text("Auto-updates require App Management permission.")
-                                .scaledFont(size: 12)
-                                .foregroundColor(FazmColors.textTertiary)
-
-                            Button("Open Settings") {
-                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppManagement") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            }
-                            .buttonStyle(.link)
-                            .scaledFont(size: 12)
-                        }
-                    }
                 }
             }
 

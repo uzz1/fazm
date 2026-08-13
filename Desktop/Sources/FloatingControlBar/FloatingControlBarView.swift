@@ -35,9 +35,6 @@ struct FloatingControlBarView: View {
     var onEditMessage: ((_ exchangeId: String, _ newText: String) -> Void)?
 
     @State private var isHovering = false
-    @State private var updatePulse = false
-    @State private var updateButtonPulse = false
-    @ObservedObject private var updaterViewModel = UpdaterViewModel.shared
     @Environment(\.fazmWindowIsVisible) private var windowIsVisible
 
     var body: some View {
@@ -209,10 +206,6 @@ struct FloatingControlBarView: View {
                     .transition(.opacity)
             } else if isHovering || streaming.showingAIConversation {
                 HStack(spacing: 0) {
-                    if updaterViewModel.updateAvailable {
-                        updateButton
-                            .padding(.leading, 4)
-                    }
                     VStack(spacing: 4) {
                         compactButton(
                             title: "Push to talk",
@@ -240,76 +233,8 @@ struct FloatingControlBarView: View {
     /// Minimal thin bar shown when not hovering
     private var compactCircleView: some View {
         RoundedRectangle(cornerRadius: 2)
-            .fill(updaterViewModel.updateAvailable ? FazmColors.purplePrimary : FazmColors.overlayForeground.opacity(0.5))
+            .fill(FazmColors.overlayForeground.opacity(0.5))
             .frame(width: 28, height: 4)
-            .shadow(
-                color: updaterViewModel.updateAvailable
-                    ? FazmColors.purplePrimary.opacity(updatePulse ? 0.9 : 0.2)
-                    : .clear,
-                radius: updatePulse ? 8 : 3
-            )
-            // Value-based animation per Extensions/WindowVisibility.swift. When
-            // the gate (updateAvailable && visible) flips false, the modifier
-            // becomes `.default`, which snaps the in-flight repeatForever to a
-            // static value and CLOSES the SwiftUI animation transaction.
-            // The previous `withAnimation(.repeatForever) { updatePulse = true }`
-            // pattern leaked the transaction across the whole subtree and made
-            // `.defaultScrollAnchor(.bottom)` re-pin every display cycle →
-            // composer lag (2026-05-27).
-            .animation(
-                updaterViewModel.updateAvailable && windowIsVisible
-                    ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true)
-                    : .default,
-                value: updatePulse
-            )
-            .onAppear { startUpdatePulseIfActive() }
-            .onChange(of: updaterViewModel.updateAvailable) { _, _ in startUpdatePulseIfActive() }
-            .onChange(of: windowIsVisible) { _, _ in startUpdatePulseIfActive() }
-    }
-
-    private func startUpdatePulseIfActive() {
-        // Just toggle the value; the value-based `.animation(...)` modifier
-        // above decides whether to repeat-forever (gates open) or snap (gates
-        // closed). Setting once is enough — autoreverses + repeatForever does
-        // the rest.
-        updatePulse = updaterViewModel.updateAvailable && windowIsVisible
-    }
-
-    private var updateButton: some View {
-        Button {
-            updaterViewModel.checkForUpdates()
-        } label: {
-            if updaterViewModel.updateSessionInProgress {
-                ProgressView()
-                    .controlSize(.mini)
-                    .frame(width: 16, height: 16)
-            } else {
-                Image(systemName: "arrow.down.circle.fill")
-                    .scaledFont(size: 16)
-                    .foregroundColor(FazmColors.purplePrimary)
-                    .opacity(updateButtonPulse ? 1.0 : 0.4)
-                    .scaleEffect(updateButtonPulse ? 1.15 : 0.9)
-                    .shadow(color: FazmColors.purplePrimary.opacity(updateButtonPulse ? 0.9 : 0.0), radius: updateButtonPulse ? 8 : 0)
-                    // Value-based animation: same fix pattern as compactCircleView.
-                    // Closes the SwiftUI animation transaction when the window
-                    // hides instead of leaking it forever — see comment there.
-                    .animation(
-                        windowIsVisible
-                            ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                            : .default,
-                        value: updateButtonPulse
-                    )
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(updaterViewModel.updateSessionInProgress)
-        .help(updaterViewModel.updateSessionInProgress ? "Updating..." : "Update available — v\(updaterViewModel.availableVersion)")
-        .onAppear { startUpdateButtonPulseIfVisible() }
-        .onChange(of: windowIsVisible) { _, _ in startUpdateButtonPulseIfVisible() }
-    }
-
-    private func startUpdateButtonPulseIfVisible() {
-        updateButtonPulse = windowIsVisible
     }
 
     private func compactToggle(_ title: String, isOn: Binding<Bool>) -> some View {

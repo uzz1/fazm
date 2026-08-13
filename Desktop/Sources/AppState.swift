@@ -618,10 +618,6 @@ class AppState: ObservableObject {
     /// Reset accessibility permission via tccutil and restart the app.
     /// Mirrors ScreenCaptureService.resetScreenCapturePermissionAndRestart().
     func resetAccessibilityPermissionAndRestart() {
-        if UpdaterViewModel.isUpdateInProgress {
-            log("Sparkle update in progress, skipping accessibility reset restart")
-            return
-        }
 
         Task.detached { [weak self] in
             guard let self = self else { return }
@@ -695,10 +691,6 @@ class AppState: ObservableObject {
 
     /// Restart the app by launching a new instance and terminating the current one
     nonisolated func restartApp() {
-        if UpdaterViewModel.isUpdateInProgress {
-            log("Sparkle update in progress, skipping independent restart (Sparkle will handle relaunch)")
-            return
-        }
 
         log("Restarting app...")
 

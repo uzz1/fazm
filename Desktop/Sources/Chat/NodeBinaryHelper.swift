@@ -2,7 +2,7 @@ import Foundation
 
 /// Ensures the bundled Node.js binary can be executed safely.
 ///
-/// On macOS 26+ (Tahoe), Sparkle auto-updates can silently corrupt the code signing
+/// On macOS 26+ (Tahoe), in-place app updates can silently corrupt the code signing
 /// seal of the bundled node binary. The kernel's Code Signing Monitor (CSM) then
 /// kills the process with SIGKILL on launch. The binary passes `codesign --verify`
 /// but still gets killed — a seal-level corruption invisible to userspace tools.
@@ -10,7 +10,7 @@ import Foundation
 /// This helper:
 /// 1. Copies the bundled node to a temp location outside the app bundle seal
 /// 2. Verifies the copy can actually execute (`node --version`)
-/// 3. Tracks when the bundled path fails but the external copy works (Sparkle corruption)
+/// 3. Tracks when the bundled path fails but the external copy works (bundle corruption)
 enum NodeBinaryHelper {
     private static var cachedPath: String?
     private(set) static var bundledNodeWasBroken = false
@@ -53,10 +53,10 @@ enum NodeBinaryHelper {
         // Verify the external copy actually runs
         if verify(path: tmpNode) {
             cachedPath = tmpNode
-            // Check if the original bundled path was broken (Sparkle corruption)
+            // Check if the original bundled path was broken (bundle corruption)
             if !verify(path: bundledPath) {
                 bundledNodeWasBroken = true
-                log("NodeBinaryHelper: ⚠️ Bundled node binary is broken (SIGKILL), using temp copy at \(tmpNode). Likely Sparkle update corruption.")
+                log("NodeBinaryHelper: ⚠️ Bundled node binary is broken (SIGKILL), using temp copy at \(tmpNode). Likely update corruption.")
             } else {
                 log("NodeBinaryHelper: Copied bundled node to \(tmpNode)")
             }

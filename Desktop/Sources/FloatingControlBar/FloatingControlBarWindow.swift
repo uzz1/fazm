@@ -819,7 +819,7 @@ class FloatingControlBarWindow: NSWindow, NSWindowDelegate {
         resizeWorkItem = nil
 
         let base = FloatingControlBarWindow.expandedBarSize
-        let updateExtra: CGFloat = UpdaterViewModel.shared.updateAvailable ? 30 : 0
+        let updateExtra: CGFloat = 0
         let expandedWithUpdate = NSSize(width: base.width + updateExtra, height: base.height)
         let targetSize = expanded ? expandedWithUpdate : FloatingControlBarWindow.minBarSize
 

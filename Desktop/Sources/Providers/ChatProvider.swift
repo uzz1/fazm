@@ -2054,13 +2054,11 @@ class ChatProvider: ObservableObject {
             log("ChatProvider: Auto-probing Gemini backend at startup")
             Task { await acpBridge.sendGeminiProbe() }
 
-            // Track if the bundled node binary was broken (Sparkle update corruption)
+            // Track if the bundled node binary was broken (bundle corruption)
             if NodeBinaryHelper.bundledNodeWasBroken {
                 let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-                let hadSparkle = UserDefaults.standard.bool(forKey: "hasSuccessfullyInstalledSparkleUpdate")
-                let installMethod = hadSparkle ? "sparkle" : "other"
-                log("ChatProvider: ⚠️ Bundled node binary was corrupted, recovered via temp copy (install=\(installMethod))")
-                AnalyticsManager.shared.nodeBinaryCorrupted(version: version, installMethod: installMethod)
+                log("ChatProvider: ⚠️ Bundled node binary was corrupted, recovered via temp copy")
+                AnalyticsManager.shared.nodeBinaryCorrupted(version: version, installMethod: "unknown")
             }
 
             return true
