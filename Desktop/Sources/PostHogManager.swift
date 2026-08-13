@@ -1,8 +1,20 @@
 import Foundation
-import PostHog
 
-/// Singleton manager for PostHog analytics with Session Replay
-/// Tracks analytics events via PostHog
+/// No-op analytics facade.
+///
+/// DeskPilot ships no analytics. The posthog-ios SDK and its API key are gone;
+/// this type survives only so the ~330 call sites spread across 24 files keep
+/// compiling without a mechanical edit of every one. Every method below does
+/// nothing and every getter returns the "disabled" answer.
+///
+/// Consequences worth knowing before changing anything here:
+/// - `isFeatureEnabled` always returns false, so any surviving feature flag is
+///   permanently off. That is the intended default; flags that gated a shipped
+///   feature should be removed at the call site, not turned back on here.
+/// - `hasOptedOut` returns true, which is the honest answer when nothing is
+///   collected. A privacy toggle bound to it will read "opted out".
+/// - Do not reintroduce a network client in this file. If DeskPilot ever wants
+///   its own telemetry it should be a new, explicitly-consented component.
 @MainActor
 class PostHogManager {
     static let shared = PostHogManager()
@@ -13,301 +25,59 @@ class PostHogManager {
         let valueDescription: String
     }
 
-    private var isInitialized = false
-    private static let heartbeatCaptureQueue = DispatchQueue(label: "com.fazm.posthog.heartbeat", qos: .utility)
-
-    // PostHog configuration
-    private let apiKey = "phc_TWwTa7D5GcjE4PprY55tJVfPKBC7kmLGiFUDZxBbYRQ"
-    private let host = "https://us.i.posthog.com"
-
     private init() {}
 
     // MARK: - Initialization
 
-    /// Initialize PostHog with analytics
     func initialize() {
-        guard !isInitialized else { return }
-
-        // Migration: clear the isIdentified flag that was incorrectly set by older
-        // versions (≤0.5.2) which called PostHogSDK.identify() from setUserProperty().
-        // MUST run BEFORE setup() so the SDK reads the corrected state from disk.
-        // PostHog stores this as a file: ~/Library/Application Support/{bundleId}/{apiKey}/posthog.isIdentified
-        let migrationKey = "posthog_identity_migrated_v3"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
-            if let bundleId = Bundle.main.bundleIdentifier,
-               let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-                let isIdentifiedFile = appSupport
-                    .appendingPathComponent(bundleId)
-                    .appendingPathComponent(apiKey)
-                    .appendingPathComponent("posthog.isIdentified")
-                try? FileManager.default.removeItem(at: isIdentifiedFile)
-            }
-            UserDefaults.standard.set(true, forKey: migrationKey)
-            log("PostHog: Cleared stale isIdentified flag (one-time migration v3, now before setup)")
-        }
-
-        let config = PostHogConfig(apiKey: apiKey, host: host)
-
-        // Disable automatic lifecycle events — PostHog's observer calls setResourceValues(isExcludedFromBackupKey:)
-        // synchronously on the main thread (via NSApplicationDidFinishLaunchingNotification), which XPCs to the
-        // mds (Spotlight) daemon and can hang for 2000ms+ when the daemon is slow. We already track lifecycle
-        // events manually via AnalyticsManager.shared.appLaunched() / appBecameActive() etc.
-        config.captureApplicationLifecycleEvents = false
-        config.captureScreenViews = true
-        config.preloadFeatureFlags = true
-
-        PostHogSDK.shared.setup(config)
-
-        isInitialized = true
-        log("PostHog: Initialized successfully")
+        log("Analytics: disabled (no-op facade)")
     }
 
     // MARK: - User Identification
 
-    /// Set device properties without triggering identification.
-    /// Never call PostHogSDK.identify() here — it sets isIdentified=true permanently,
-    /// which blocks identifyAuthUser() from changing the distinct_id to the Firebase UID.
-    /// The only place that should call PostHogSDK.identify() is identifyAuthUser().
-    func identify() {
-        guard isInitialized else { return }
+    func identify() {}
 
-        // If user is authenticated, identifyAuthUser() will be called shortly — skip.
-        if UserDefaults.standard.string(forKey: "auth_tokenUserId")?.isEmpty == false {
-            log("PostHog: Skipping device identify — authenticated user will be identified via identifyAuthUser()")
-            return
-        }
+    func setUserProperty(key: String, value: Any) {}
 
-        // For anonymous users, just set device properties without calling identify().
-        // PostHog's auto-generated anonymous ID is sufficient for pre-auth tracking.
-        let properties: [String: Any] = [
-            "platform": "macos",
-            "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
-        ]
-        PostHogSDK.shared.capture("$set", properties: ["$set": properties])
-        log("PostHog: Set device properties (anonymous)")
-    }
+    func identifyAuthUser(userId: String, properties: [String: Any]) {}
 
-    /// Get or create a stable device identifier
-    private func getOrCreateDeviceId() -> String {
-        let key = "analytics_device_id"
-        if let existing = UserDefaults.standard.string(forKey: key) {
-            return existing
-        }
-        let newId = UUID().uuidString
-        UserDefaults.standard.set(newId, forKey: key)
-        return newId
-    }
-
-    /// Set a specific user property without triggering identification.
-    /// Uses capture($set) instead of identify() because the PostHog SDK's identify()
-    /// sets isIdentified=true, which permanently locks the distinct_id and prevents
-    /// the real identifyAuthUser() call from changing it to the Firebase UID.
-    func setUserProperty(key: String, value: Any) {
-        guard isInitialized else { return }
-        PostHogSDK.shared.capture("$set", properties: ["$set": [key: value]])
-    }
-
-    /// Identify an authenticated user (links device to Firebase user).
-    /// This is the ONLY method that should call PostHogSDK.identify().
-    /// No other code path should call PostHogSDK.identify() — use capture("$set") instead.
-    func identifyAuthUser(userId: String, properties: [String: Any]) {
-        guard isInitialized else { return }
-
-        let currentDistinctId = PostHogSDK.shared.getDistinctId()
-
-        // If already identified as this user, just update properties.
-        if currentDistinctId == userId {
-            PostHogSDK.shared.capture("$set", properties: ["$set": properties])
-            log("PostHog: Updated auth user properties for \(userId)")
-            return
-        }
-
-        // Call identify() directly — the SDK sets $anon_distinct_id = currentDistinctId
-        // in the $identify event, which tells PostHog to merge the anonymous person
-        // into the authenticated person. No reset() needed because we never call
-        // PostHogSDK.identify() elsewhere (setUserProperty and identify() use $set),
-        // so isIdentified stays false until this call.
-        PostHogSDK.shared.identify(userId, userProperties: properties)
-        log("PostHog: Identified auth user \(userId) (was: \(currentDistinctId))")
-
-        // Always set properties on the CURRENT person via $set as a safety net.
-        // If the identify() call above was silently ignored (e.g., because an older
-        // buggy version set isIdentified=true prematurely), the distinct_id stays as
-        // the device UUID and the person receiving events has no email/name. This
-        // explicit $set ensures properties are set on whatever person is active.
-        let newDistinctId = PostHogSDK.shared.getDistinctId()
-        if newDistinctId != userId {
-            PostHogSDK.shared.capture("$set", properties: ["$set": properties])
-            log("PostHog: identify() did not switch distinct_id (still \(newDistinctId)), forcing $set on current person")
-        }
-    }
-
-    /// Register super properties that are sent with every event
-    func register(properties: [String: Any]) {
-        guard isInitialized else { return }
-        PostHogSDK.shared.register(properties)
-    }
+    func register(properties: [String: Any]) {}
 
     // MARK: - Event Tracking
 
-    /// Track an event with optional properties
-    func track(_ eventName: String, properties: [String: Any]? = nil) {
-        guard isInitialized else { return }
-        PostHogSDK.shared.capture(eventName, properties: properties)
-        log("PostHog: Tracked event '\(eventName)'")
-    }
+    func track(_ eventName: String, properties: [String: Any]? = nil) {}
 
-    /// Track the periodic session heartbeat away from the main actor.
-    ///
-    /// PostHog's capture path synchronously reads disk-backed group and super-property
-    /// storage before enqueueing an event. The heartbeat runs every minute, so keep that
-    /// low-value recurring IO off the UI thread.
-    func trackSessionHeartbeat(durationMinutes: Int) {
-        guard isInitialized else { return }
-        Self.heartbeatCaptureQueue.async {
-            PostHogSDK.shared.capture("session_heartbeat", properties: [
-                "session_duration_minutes": durationMinutes
-            ])
-            log("PostHog: Tracked event 'session_heartbeat' on background queue")
-        }
-    }
+    func trackSessionHeartbeat(durationMinutes: Int) {}
 
     // MARK: - Screen Tracking
 
-    /// Track a screen view
-    func screen(_ screenName: String, properties: [String: Any]? = nil) {
-        guard isInitialized else { return }
-        PostHogSDK.shared.screen(screenName, properties: properties)
-    }
+    func screen(_ screenName: String, properties: [String: Any]? = nil) {}
 
     // MARK: - Opt In/Out
 
-    /// Opt in to tracking
-    func optIn() {
-        guard isInitialized else { return }
-        PostHogSDK.shared.optIn()
-    }
+    func optIn() {}
 
-    /// Opt out of tracking
-    func optOut() {
-        guard isInitialized else { return }
-        PostHogSDK.shared.optOut()
-    }
+    func optOut() {}
 
-    /// Check if tracking is opted out
-    var hasOptedOut: Bool {
-        guard isInitialized else { return true }
-        return !PostHogSDK.shared.isOptOut()
-    }
+    /// Always true: with no collection there is nothing to opt into.
+    var hasOptedOut: Bool { true }
 
     // MARK: - Reset
 
-    /// Reset the user (call on sign out)
-    func reset() {
-        guard isInitialized else { return }
-        PostHogSDK.shared.reset()
-        log("PostHog: Reset user")
-    }
+    func reset() {}
 
     // MARK: - Feature Flags
 
-    /// Check if a feature flag is enabled
-    func isFeatureEnabled(_ flag: String) -> Bool {
-        guard isInitialized else { return false }
-        return PostHogSDK.shared.isFeatureEnabled(flag)
-    }
+    /// Always false. Every flag is permanently off.
+    func isFeatureEnabled(_ flag: String) -> Bool { false }
 
-    /// Get feature flag value
-    func getFeatureFlag(_ flag: String) -> Any? {
-        guard isInitialized else { return nil }
-        return PostHogSDK.shared.getFeatureFlag(flag)
-    }
+    func getFeatureFlag(_ flag: String) -> Any? { nil }
 
-    /// Reload feature flags and then evaluate a specific flag.
-    ///
-    /// The sign-in gate runs on first launch, when PostHog's preload request is
-    /// often still in flight. A direct `isFeatureEnabled` call can therefore
-    /// read nil and accidentally treat a treatment user as control. This helper
-    /// waits for an explicit reload, with a bounded fallback to the current
-    /// cached value so the UI never hangs behind analytics.
     func evaluateFeatureFlagAfterReload(_ flag: String, timeout: TimeInterval = 3.0) async -> FeatureFlagEvaluation {
-        guard isInitialized else {
-            return FeatureFlagEvaluation(enabled: false, resolved: false, valueDescription: "uninitialized")
-        }
-
-        return await withCheckedContinuation { continuation in
-            let resumeOnce = FeatureFlagEvaluationContinuation(continuation)
-
-            @MainActor
-            func resolveFromCache() {
-                let value = PostHogSDK.shared.getFeatureFlag(flag)
-                resumeOnce.resume(returning: Self.evaluation(from: value))
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-                Task { @MainActor in
-                    resolveFromCache()
-                }
-            }
-
-            PostHogSDK.shared.reloadFeatureFlags {
-                Task { @MainActor in
-                    resolveFromCache()
-                }
-            }
-        }
+        FeatureFlagEvaluation(enabled: false, resolved: false, valueDescription: "analytics-disabled")
     }
 
-    private static func evaluation(from value: Any?) -> FeatureFlagEvaluation {
-        switch value {
-        case let enabled as Bool:
-            return FeatureFlagEvaluation(
-                enabled: enabled,
-                resolved: true,
-                valueDescription: enabled ? "true" : "false"
-            )
-        case let variant as String:
-            return FeatureFlagEvaluation(
-                enabled: !variant.isEmpty,
-                resolved: true,
-                valueDescription: variant
-            )
-        case .some(let value):
-            return FeatureFlagEvaluation(
-                enabled: false,
-                resolved: true,
-                valueDescription: String(describing: value)
-            )
-        case nil:
-            return FeatureFlagEvaluation(
-                enabled: false,
-                resolved: false,
-                valueDescription: "nil"
-            )
-        }
-    }
-
-    /// Reload feature flags
-    func reloadFeatureFlags() {
-        guard isInitialized else { return }
-        PostHogSDK.shared.reloadFeatureFlags()
-    }
-}
-
-@MainActor
-private final class FeatureFlagEvaluationContinuation {
-    private var didResume = false
-    private let continuation: CheckedContinuation<PostHogManager.FeatureFlagEvaluation, Never>
-
-    init(_ continuation: CheckedContinuation<PostHogManager.FeatureFlagEvaluation, Never>) {
-        self.continuation = continuation
-    }
-
-    func resume(returning value: PostHogManager.FeatureFlagEvaluation) {
-        guard !didResume else { return }
-        didResume = true
-        continuation.resume(returning: value)
-    }
+    func reloadFeatureFlags() {}
 }
 
 // MARK: - Analytics Events

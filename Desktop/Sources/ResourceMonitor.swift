@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import PostHog
 import MachO
 
 /// Monitors system resources (memory, CPU, disk) and reports to the app log

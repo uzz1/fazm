@@ -1,6 +1,5 @@
 import SwiftUI
 import GRDB
-import PostHog
 
 /// Discovered Tasks tab — shows tasks identified by the screen observer (Gemini analysis).
 struct DiscoveredTasksSection: View {

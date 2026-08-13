@@ -1,6 +1,5 @@
 import Foundation
 import GRDB
-import PostHog
 
 /// Accumulates session recording chunks and periodically sends them to the Gemini API
 /// for multimodal video analysis to identify tasks an AI agent could help with.
@@ -280,23 +279,6 @@ actor GeminiAnalysisService {
         let analyzedCount = chunks.count
         let result = await runAnalysis(chunks: chunks)
         if let result {
-            // Track the analysis result in PostHog
-            var properties: [String: Any] = [
-                "verdict": result.verdict,
-                "category": result.category,
-                "chunks_analyzed": result.chunksAnalyzed,
-                "response": result.raw,
-                "tool_call_count": result.toolCallCount,
-                "turns_used": result.turnsUsed,
-                "input_tokens": result.inputTokens,
-                "output_tokens": result.outputTokens,
-                "total_tokens": result.totalTokens,
-            ]
-            if let task = result.task {
-                properties["task"] = task
-            }
-            PostHogSDK.shared.capture("gemini_analysis_completed", properties: properties)
-
             if result.totalTokens > 0 {
                 let usage = result
                 Task.detached(priority: .background) {
@@ -334,11 +316,6 @@ actor GeminiAnalysisService {
         } else {
             // Failed — keep buffer intact, set cooldown before retry
             lastFailedAnalysis = Date()
-            PostHogSDK.shared.capture("gemini_analysis_failed", properties: [
-                "chunks_count": analyzedCount,
-                "failure_reason": lastFailureReason ?? "unknown",
-                "region_unsupported": regionUnsupported
-            ])
             log("GeminiAnalysis: analysis failed, keeping \(chunks.count) chunks for retry (cooldown \(Int(retryCooldown))s)")
         }
         return result
@@ -1097,7 +1074,6 @@ actor GeminiAnalysisService {
         guard !regionUnsupported else { return }
         regionUnsupported = true
         log("GeminiAnalysis: Gemini API not available in this region — disabling screen analysis for this session")
-        PostHogSDK.shared.capture("gemini_analysis_region_unsupported")
     }
 
     // MARK: - Helpers

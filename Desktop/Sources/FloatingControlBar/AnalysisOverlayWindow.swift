@@ -1,6 +1,5 @@
 import Cocoa
 import GRDB
-import PostHog
 import SwiftUI
 
 /// NSPanel subclass that can become key (required for buttons to work in a borderless floating panel).
