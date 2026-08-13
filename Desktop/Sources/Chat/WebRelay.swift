@@ -543,50 +543,17 @@ final class WebRelay: ObservableObject {
 
     // MARK: - Backend Registration
 
-    private func registerTunnel(url: String) async {
-        guard let backendUrl = ProcessInfo.processInfo.environment["FAZM_BACKEND_URL"] else {
-            log("WebRelay: missing backend URL, skipping registration")
-            return
-        }
+    /// `registerTunnel` / `unregisterTunnel` used to POST the cloudflared URL
+    /// to `${FAZM_BACKEND_URL}/api/relay/register` with a Firebase ID token, so
+    /// chat.fazm.ai could find this machine. No account means no token means no
+    /// registration, so both are gone and the heartbeat no longer calls out.
+    ///
+    /// The local WebSocket server and the tunnel still come up: they are what
+    /// the pop-out and phone clients speak to directly, and neither needs Fazm's
+    /// backend. What is gone is the hosted directory that pointed a phone at
+    /// this tunnel — see the report; the Remote Control settings section is left
+    /// in place because the local half of it still works.
+    private func registerTunnel(url: String) async {}
 
-        let token: String
-        do {
-            token = try await AuthService.shared.getIdToken()
-        } catch {
-            log("WebRelay: failed to get auth token for registration, skipping")
-            return
-        }
-
-        let endpoint = "\(backendUrl)/api/relay/register"
-        var request = URLRequest(url: URL(string: endpoint)!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: String] = ["tunnel_url": url]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                log("WebRelay: tunnel registered with backend")
-            } else {
-                log("WebRelay: register got status \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-            }
-        } catch {
-            logError("WebRelay: register failed", error: error)
-        }
-    }
-
-    private func unregisterTunnel() {
-        guard let backendUrl = ProcessInfo.processInfo.environment["FAZM_BACKEND_URL"],
-              let token = AuthService.shared.idToken else { return }
-
-        let endpoint = "\(backendUrl)/api/relay/unregister"
-        var request = URLRequest(url: URL(string: endpoint)!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
-    }
+    private func unregisterTunnel() {}
 }

@@ -277,8 +277,16 @@ auth_debug "AFTER plist edits: auth_isSignedIn=$(defaults read "$BUNDLE_ID" auth
 # Copy resource bundle (contains app assets like permissions.gif, herologo.png, etc.)
 RESOURCE_BUNDLE="Desktop/.build/arm64-apple-macosx/debug/Fazm_Fazm.bundle"
 if [ -d "$RESOURCE_BUNDLE" ]; then
+    # Firebase is gone, but deleting GoogleService-Info*.plist from Sources/Resources
+    # is not enough to stop them shipping. SwiftPM adds resources to its bundle and
+    # never prunes ones that disappear from source, and the copy below is `cp -Rf`,
+    # which overwrites but does not delete. Both sides therefore keep serving the
+    # old files — same failure mode as the Sparkle.framework that survived its
+    # removal. Delete at the source of the copy so the app bundle cannot inherit them.
+    rm -f "$RESOURCE_BUNDLE"/GoogleService-Info*.plist 2>/dev/null
     substep "Copying resource bundle ($(du -sh "$RESOURCE_BUNDLE" 2>/dev/null | cut -f1))"
     cp -Rf "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+    rm -f "$APP_BUNDLE/Contents/Resources/Fazm_Fazm.bundle"/GoogleService-Info*.plist 2>/dev/null
 fi
 
 # Copy Highlightr resource bundle (required — missing bundle causes fatal crash when rendering code blocks)

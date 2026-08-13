@@ -57,7 +57,7 @@ struct FeedbackView: View {
         self.userEmail = userEmail
         self.onDismiss = onDismiss
         _email = State(initialValue: userEmail ?? "")
-        _name = State(initialValue: AuthService.shared.displayName)
+        _name = State(initialValue: LocalUser.displayName)
     }
 
     var body: some View {

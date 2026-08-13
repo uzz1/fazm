@@ -2591,43 +2591,13 @@ actor ACPBridge {
       env["FAZM_RESOURCES_PATH"] = resourcePath
     }
 
-    // Composio MCP wiring. When the user has connected a Composio toolkit
-    // (Gmail today; Slack, GitHub, etc. later), the bridge registers an
-    // HTTP MCP server pointed at our backend proxy at
-    // `${FAZM_BACKEND_URL}/api/composio/mcp/<toolkit>`. The proxy holds the
-    // Composio API key server-side and forwards requests under this user's
-    // Firebase identity.
-    //
-    // We always inject FAZM_AUTH_TOKEN (when signed in) so the agent can call
-    // /api/composio/connect from a skill to *start* the OAuth flow even before
-    // any toolkit is enabled. FAZM_COMPOSIO_TOOLKITS is the post-OAuth signal
-    // that tells the bridge to actually register MCP servers.
-    //
-    // Token lifetime: ~1 hour. Long-running sessions will eventually 401 on
-    // Composio tool calls; the skill nudges the user to reconnect (which
-    // triggers `restartBridge`) when that happens. Refresh-on-tool-failure
-    // is a v2 problem.
-    var firebaseToken: String? = nil
-    if let token = try? await AuthService.shared.getIdToken(), !token.isEmpty {
-      firebaseToken = token
-      env["FAZM_AUTH_TOKEN"] = token
-    }
-    let composioFlags = ["composioGmailEnabled"].filter { defaults.bool(forKey: $0) }
-    if !composioFlags.isEmpty {
-      if firebaseToken != nil {
-        let toolkits = composioFlags.compactMap { flag -> String? in
-          switch flag {
-          case "composioGmailEnabled": return "gmail"
-          default: return nil
-          }
-        }
-        let toolkitsCSV = toolkits.joined(separator: ",")
-        env["FAZM_COMPOSIO_TOOLKITS"] = toolkitsCSV
-        log("ACPBridge: Composio toolkits enabled: \(toolkitsCSV)")
-      } else {
-        log("ACPBridge: Composio toolkit(s) enabled but no auth token available; skipping")
-      }
-    }
+    // Composio MCP wiring is gone. The bridge reached Composio through
+    // `${FAZM_BACKEND_URL}/api/composio/mcp/<toolkit>`, a proxy that held the
+    // Composio API key server-side and attributed every call to this user's
+    // Firebase identity via FAZM_AUTH_TOKEN. With no account there is no
+    // identity to attribute to and no token to send, so neither the toolkit
+    // registration nor the OAuth-start call can succeed. `composioGmailEnabled`
+    // is left in UserDefaults but now controls nothing.
 
     return env
   }

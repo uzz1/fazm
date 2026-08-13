@@ -591,7 +591,7 @@ class ChatToolExecutor {
         }
 
         if let name = args["name"] as? String, !name.isEmpty {
-            await AuthService.shared.updateGivenName(name)
+            LocalUser.updateGivenName(name)
             results.append("Name updated to \(name)")
         }
 

@@ -1924,7 +1924,7 @@ class ChatProvider: ObservableObject {
             let floatingSystemPrompt = Self.floatingBarSystemPromptPrefixCurrent + "\n\n" + mainSystemPrompt
             let savedFloatingSessionId = UserDefaults.standard.string(forKey: floatingSessionIdKey)
             let savedMainSessionId = UserDefaults.standard.string(forKey: mainSessionIdKey)
-            let chatObserverUserName = AuthService.shared.displayName.isEmpty ? "the user" : AuthService.shared.givenName
+            let chatObserverUserName = LocalUser.displayName.isEmpty ? "the user" : LocalUser.givenName
             let chatObserverSystemPrompt = ChatPromptBuilder.buildChatObserverSession(
                 userName: chatObserverUserName,
                 databaseSchema: cachedDatabaseSchema
@@ -2898,8 +2898,8 @@ class ChatProvider: ObservableObject {
     /// Conversation history is injected here so the brand-new ACP session starts with context
     /// from before the app launch. After session/new the ACP SDK owns history natively.
     private func buildSystemPrompt(contextString: String) -> String {
-        // Get user name from AuthService
-        let userName = AuthService.shared.displayName.isEmpty ? "there" : AuthService.shared.givenName
+        // Get the local user name
+        let userName = LocalUser.displayName.isEmpty ? "there" : LocalUser.givenName
 
         let aiProfileSection = formatAIProfileSection()
 
@@ -3025,7 +3025,7 @@ class ChatProvider: ObservableObject {
 
     /// Build system prompt for task chat sessions.
     func buildTaskChatSystemPrompt() -> String {
-        let userName = AuthService.shared.displayName.isEmpty ? "there" : AuthService.shared.givenName
+        let userName = LocalUser.displayName.isEmpty ? "there" : LocalUser.givenName
         let aiProfileSection = formatAIProfileSection()
 
         var prompt = ChatPromptBuilder.buildDesktopChat(
@@ -3065,7 +3065,7 @@ class ChatProvider: ObservableObject {
 
     /// Builds a minimal system prompt (for simple messages)
     private func buildSystemPromptSimple() -> String {
-        let userName = AuthService.shared.displayName.isEmpty ? "there" : AuthService.shared.givenName
+        let userName = LocalUser.displayName.isEmpty ? "there" : LocalUser.givenName
         return ChatPromptBuilder.buildDesktopChat(userName: userName)
     }
 
@@ -3416,8 +3416,10 @@ class ChatProvider: ObservableObject {
     /// Poll for new messages from other platforms (e.g. mobile).
     /// Merges new messages into the existing array without disrupting the UI.
     private func pollForNewMessages() async {
-        // Skip if user is signed out (tokens are cleared)
-        guard AuthState.shared.isSignedIn else { return }
+        // This used to bail when signed out, because the poll read a hosted
+        // mailbox. `APIClient.getMessages` is a local stub returning [], so the
+        // poll is now inert; the guard is dropped rather than pinned to a
+        // constant.
         // Skip if we're actively sending. Note: isSending is released *before* the AI
         // message is saved to the backend (to unblock the next query). This means the
         // poll can run while saveMessage() is still in-flight — see the race note below.

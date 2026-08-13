@@ -763,12 +763,6 @@ class AppState: ObservableObject {
         UserDefaults.standard.synchronize()
         log("Cleared onboarding UserDefaults keys")
 
-        // Sign out of Fazm account (Firebase, tokens, Sentry)
-        DispatchQueue.main.async {
-            AuthService.shared.signOut()
-            log("Signed out of Fazm account")
-        }
-
         // Clear mid-onboarding chat persistence (session ID, completed steps, messages)
         OnboardingChatPersistence.clear()
         log("Cleared onboarding chat persistence")

@@ -1,5 +1,5 @@
 import SwiftUI
-import FirebaseCore
+import AppKit
 
 // MARK: - Launch Mode
 /// Determines which UI to show based on command-line arguments
@@ -23,57 +23,6 @@ enum LaunchMode: String {
 /// Check for --skip-onboarding flag to bypass onboarding during development
 func shouldSkipOnboarding() -> Bool {
     return CommandLine.arguments.contains("--skip-onboarding")
-}
-
-// Auth state — backed by Firebase Auth via AuthService
-@MainActor
-class AuthState: ObservableObject {
-    static let shared = AuthState()
-
-    // UserDefaults keys
-    private static let kAuthUserEmail = "auth_userEmail"
-    private static let kAuthUserId = "auth_tokenUserId"
-    private static let kAuthIsSignedIn = "auth_isSignedIn"
-    private static let kAuthIsAnonymous = "auth_isAnonymous"
-
-    @Published var isSignedIn: Bool = false
-    @Published var isLoading: Bool = false
-    @Published var error: String?
-    @Published var userEmail: String?
-    /// True when the current Firebase user was created via signInAnonymously.
-    /// Drives UI branches: the paywall shows a "Sign in to subscribe" step
-    /// instead of going straight to Stripe, and Settings shows a "Save your
-    /// account" row so anon users can upgrade outside the paywall.
-    @Published var isAnonymous: Bool = false
-
-    private init() {
-        // Restore from UserDefaults — AuthService.configure() will update these
-        let savedSignedIn = UserDefaults.standard.bool(forKey: Self.kAuthIsSignedIn)
-        self.isSignedIn = savedSignedIn
-        self.userEmail = UserDefaults.standard.string(forKey: Self.kAuthUserEmail)
-        self.isAnonymous = UserDefaults.standard.bool(forKey: Self.kAuthIsAnonymous)
-
-        NSLog("FazmApp AuthState: Initialized, savedSignedIn=%@, isAnonymous=%@, email=%@, userId=%@",
-              savedSignedIn ? "true" : "false",
-              self.isAnonymous ? "true" : "false",
-              self.userEmail ?? "nil",
-              UserDefaults.standard.string(forKey: Self.kAuthUserId) ?? "nil")
-    }
-
-    func update(isSignedIn: Bool, userEmail: String? = nil, isAnonymous: Bool = false) {
-        self.isSignedIn = isSignedIn
-        UserDefaults.standard.set(isSignedIn, forKey: Self.kAuthIsSignedIn)
-        if let email = userEmail {
-            self.userEmail = email
-        }
-        self.isAnonymous = isAnonymous
-        UserDefaults.standard.set(isAnonymous, forKey: Self.kAuthIsAnonymous)
-    }
-
-    /// Get the user's UID from UserDefaults (set by AuthService on sign-in)
-    var userId: String? {
-        UserDefaults.standard.string(forKey: Self.kAuthUserId)
-    }
 }
 
 /// Stores SwiftUI's `openWindow` action so AppDelegate can reopen the settings window.
@@ -191,11 +140,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // floating-bar/popout window churn is hitting an AppKit weak-ref bug.
         NSWindow.applyAppGlobalCrashWorkarounds()
 
-        // Configure Firebase and AuthService
-        AuthService.shared.configure()
-
         log("AppDelegate: applicationDidFinishLaunching started (mode: \(FazmApp.launchMode.rawValue))")
-        log("AppDelegate: AuthState.isSignedIn=\(AuthState.shared.isSignedIn)")
+        log("AppDelegate: local user id=\(LocalUser.id)")
 
         // Cap URLCache.shared. The default macOS cap (~512 MB disk + ~20 MB memory) lets
         // CFNetwork dirty multi-GB of file-backed memory writing to ~/Library/Caches/com.fazm.app/Cache.db,
@@ -281,10 +227,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Set per-user database path before any async tasks can trigger DB initialization.
+        // Set the database path before any async task can trigger DB initialization.
         // This is synchronous and must happen before TierManager / TranscriptionRetryService.
-        let userId = UserDefaults.standard.string(forKey: "auth_tokenUserId")
-        AppDatabase.currentUserId = (userId?.isEmpty == false) ? userId : "anonymous"
+        AppDatabase.currentUserId = LocalUser.id
 
         // Start resource monitoring (memory, CPU, disk)
         ResourceMonitor.shared.start()
@@ -298,12 +243,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Identify analytics
         AnalyticsManager.shared.identify()
         AnalyticsManager.shared.reportAllSettingsIfNeeded()
-
-        // Re-identify authenticated user with PostHog now that the SDK is initialized.
-        // restoreAuthState() (called at line 170, before PostHog initializes) calls
-        // setPostHogUserContext() too early — PostHogManager silently drops it.
-        // Calling it here ensures email/firebase_uid are linked to the device UUID.
-        AuthService.shared.setPostHogUserContext()
 
         // Test trigger: re-enter onboarding without signing out or resetting permissions.
         // Lightweight reset — keeps sign-in + permissions, just flips hasCompletedOnboarding
@@ -744,13 +683,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
-        // Sign Out item (shown when signed in; updated dynamically in menuWillOpen)
-        let signOutItem = NSMenuItem(title: "Sign Out", action: #selector(signOutFromMenu), keyEquivalent: "")
-        signOutItem.target = self
-        signOutItem.tag = 1001 // tag for dynamic updates
-        signOutItem.isHidden = !AuthState.shared.isSignedIn
-        menu.addItem(signOutItem)
-
         menu.addItem(NSMenuItem.separator())
 
         // Report Issue
@@ -812,7 +744,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @MainActor @objc private func reportIssue() {
         AnalyticsManager.shared.menuBarActionClicked(action: "report_issue")
-        FeedbackWindow.show(userEmail: AuthState.shared.userEmail)
+        FeedbackWindow.show(userEmail: LocalUser.email)
     }
 
     @MainActor @objc private func resetOnboarding() {
@@ -823,11 +755,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @MainActor @objc private func quitApp() {
         AnalyticsManager.shared.menuBarActionClicked(action: "quit")
         NSApplication.shared.terminate(nil)
-    }
-
-    @MainActor @objc private func signOutFromMenu() {
-        AnalyticsManager.shared.menuBarActionClicked(action: "sign_out")
-        AuthService.shared.signOut()
     }
 
     // MARK: - App Menus (Format / Help)
@@ -919,19 +846,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - NSMenuDelegate
     func menuWillOpen(_ menu: NSMenu) {
-        // Status bar menu — update sign-out item
-        if let signOutItem = menu.item(withTag: 1001) {
-            log("AppDelegate: [MENUBAR] Menu opened by user")
-            AnalyticsManager.shared.menuBarOpened()
-            let isSignedIn = AuthState.shared.isSignedIn
-            signOutItem.isHidden = !isSignedIn
-            if let email = AuthState.shared.userEmail, !email.isEmpty {
-                signOutItem.title = "Sign Out (\(email))"
-            } else {
-                signOutItem.title = "Sign Out"
-            }
-        }
-
         // App menu — inject "Settings…" (SwiftUI rebuilds this menu each time)
         if menu == NSApp.mainMenu?.items.first?.submenu {
             addSettingsMenuItem(to: menu)
@@ -1162,7 +1076,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         AnalyticsManager.shared.appBecameActive()
-        Task { @MainActor in AuthService.shared.reconcileAuthState() }
     }
 
     func applicationWillResignActive(_ notification: Notification) {

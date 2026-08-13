@@ -189,8 +189,6 @@ struct InstalledApp: Identifiable, Codable, Equatable {
 
 // MARK: - API Client
 
-// AuthError moved to AuthService.swift
-
 struct ChatMessageResponse: Codable {
     var id: String
     var text: String
@@ -265,231 +263,24 @@ class APIClient {
     func getInitialMessage(sessionId: String, appId: String? = nil) async throws -> InitialMessageResponse {
         InitialMessageResponse(message: "Hello!", messageId: UUID().uuidString)
     }
-    // MARK: - LLM Usage (Firestore REST API)
+    // MARK: - LLM Usage
 
-    private static let firestoreProjectId = "fazm-prod"
+    /// LLM-usage accounting used to write to Firestore
+    /// (`firestore.googleapis.com/v1/projects/fazm-prod/.../users/<uid>/llm_usage`)
+    /// and to Fazm's own trace endpoint, both authenticated with a Firebase ID
+    /// token. With no account there is no `<uid>` to write under and no token
+    /// to write with, so the requests are gone.
+    ///
+    /// The three entry points stay as no-ops rather than being deleted: their
+    /// callers sit in the middle of the streaming and Gemini paths, and gutting
+    /// those paths to drop a metrics call would reach well beyond removing auth.
+    /// `fetchTotalBuiltinCost` returning nil is already a handled case at its
+    /// only call site — it leaves the local cost counter as the source of truth.
+    func recordLlmUsage(inputTokens: Int = 0, outputTokens: Int = 0, cacheReadTokens: Int = 0, cacheWriteTokens: Int = 0, totalTokens: Int = 0, costUsd: Double = 0, account: String = "") async {}
 
-    /// Record LLM usage to Firestore using atomic field transforms (server-side increments).
-    /// Uses the Firebase ID token from AuthService for authentication.
-    func recordLlmUsage(inputTokens: Int = 0, outputTokens: Int = 0, cacheReadTokens: Int = 0, cacheWriteTokens: Int = 0, totalTokens: Int = 0, costUsd: Double = 0, account: String = "") async {
-        log("APIClient: recordLlmUsage called (account=\(account), cost=$\(String(format: "%.4f", costUsd)), tokens=\(totalTokens))")
+    func fetchTotalBuiltinCost() async -> Double? { nil }
 
-        // Build a shared property bag so every skip/failure event is comparable.
-        // This is the only place that surfaces silently-dropped LLM usage; without it,
-        // fresh-install / pre-auth usage is invisible in PostHog and Firestore both.
-        let baseProps: [String: Any] = [
-            "account": account,
-            "cost_usd": costUsd,
-            "input_tokens": inputTokens,
-            "output_tokens": outputTokens,
-            "cache_read_tokens": cacheReadTokens,
-            "cache_write_tokens": cacheWriteTokens,
-            "total_tokens": totalTokens,
-        ]
-
-        guard let uid = AuthService.shared.userId else {
-            log("APIClient: recordLlmUsage skipped — not signed in")
-            var props = baseProps
-            props["reason"] = "no_user_id"
-            PostHogManager.shared.track("llm_usage_record_skipped", properties: props)
-            return
-        }
-        guard let idToken = try? await AuthService.shared.getIdToken() else {
-            log("APIClient: recordLlmUsage skipped — no ID token")
-            var props = baseProps
-            props["reason"] = "no_id_token"
-            props["user_id"] = uid
-            PostHogManager.shared.track("llm_usage_record_skipped", properties: props)
-            return
-        }
-
-        let dateKey = {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd"
-            formatter.timeZone = TimeZone(identifier: "UTC")
-            return formatter.string(from: Date())
-        }()
-
-        let docPath = "projects/\(Self.firestoreProjectId)/databases/(default)/documents/users/\(uid)/llm_usage/\(dateKey)"
-        let commitUrl = "https://firestore.googleapis.com/v1/projects/\(Self.firestoreProjectId)/databases/(default)/documents:commit"
-        let acctPrefix = "desktop_chat_\(account)"
-
-        func intIncrement(_ field: String, _ value: Int) -> [String: Any] {
-            ["fieldPath": field, "increment": ["integerValue": String(value)] as [String: Any]]
-        }
-        func dblIncrement(_ field: String, _ value: Double) -> [String: Any] {
-            ["fieldPath": field, "increment": ["doubleValue": value] as [String: Any]]
-        }
-
-        let transforms: [[String: Any]] = [
-            intIncrement("desktop_chat.input_tokens", inputTokens),
-            intIncrement("desktop_chat.output_tokens", outputTokens),
-            intIncrement("desktop_chat.cache_read_tokens", cacheReadTokens),
-            intIncrement("desktop_chat.cache_write_tokens", cacheWriteTokens),
-            intIncrement("desktop_chat.total_tokens", totalTokens),
-            dblIncrement("desktop_chat.cost_usd", costUsd),
-            intIncrement("desktop_chat.call_count", 1),
-            intIncrement("\(acctPrefix).input_tokens", inputTokens),
-            intIncrement("\(acctPrefix).output_tokens", outputTokens),
-            intIncrement("\(acctPrefix).cache_read_tokens", cacheReadTokens),
-            intIncrement("\(acctPrefix).cache_write_tokens", cacheWriteTokens),
-            intIncrement("\(acctPrefix).total_tokens", totalTokens),
-            dblIncrement("\(acctPrefix).cost_usd", costUsd),
-            intIncrement("\(acctPrefix).call_count", 1),
-            ["fieldPath": "last_updated_at", "setToServerValue": "REQUEST_TIME"],
-        ]
-
-        let write: [String: Any] = [
-            "transform": [
-                "document": docPath,
-                "fieldTransforms": transforms,
-            ] as [String: Any]
-        ]
-        let body: [String: Any] = ["writes": [write]]
-
-        do {
-            let jsonData = try JSONSerialization.data(withJSONObject: body)
-            var request = URLRequest(url: URL(string: commitUrl)!)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = jsonData
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse {
-                if (200...299).contains(httpResponse.statusCode) {
-                    log("APIClient: recordLlmUsage success (account=\(account), cost=$\(String(format: "%.4f", costUsd)))")
-                } else {
-                    let body = String(data: data, encoding: .utf8) ?? ""
-                    log("APIClient: recordLlmUsage failed (status \(httpResponse.statusCode)): \(body.prefix(200))")
-                    var props = baseProps
-                    props["reason"] = "http_error"
-                    props["status_code"] = httpResponse.statusCode
-                    props["user_id"] = uid
-                    props["response_body_preview"] = String(body.prefix(200))
-                    PostHogManager.shared.track("llm_usage_record_skipped", properties: props)
-                }
-            }
-        } catch {
-            log("APIClient: recordLlmUsage failed: \(error.localizedDescription)")
-            var props = baseProps
-            props["reason"] = "network_exception"
-            props["error"] = error.localizedDescription
-            props["user_id"] = uid
-            PostHogManager.shared.track("llm_usage_record_skipped", properties: props)
-        }
-    }
-
-    /// Fetch total LLM cost for the current user from Firestore.
-    /// Sums desktop_chat_builtin.cost_usd across all daily llm_usage documents.
-    func fetchTotalBuiltinCost() async -> Double? {
-        guard let uid = AuthService.shared.userId else {
-            log("APIClient: fetchTotalBuiltinCost skipped — not signed in")
-            return nil
-        }
-        guard let idToken = try? await AuthService.shared.getIdToken() else {
-            log("APIClient: fetchTotalBuiltinCost skipped — no ID token")
-            return nil
-        }
-
-        let parent = "https://firestore.googleapis.com/v1/projects/\(Self.firestoreProjectId)/databases/(default)/documents/users/\(uid)"
-        let queryUrl = "\(parent):runQuery"
-
-        let query: [String: Any] = [
-            "structuredQuery": [
-                "from": [["collectionId": "llm_usage"]]
-            ]
-        ]
-
-        do {
-            let jsonData = try JSONSerialization.data(withJSONObject: query)
-            var request = URLRequest(url: URL(string: queryUrl)!)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = jsonData
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                log("APIClient: fetchTotalBuiltinCost failed (status \(statusCode))")
-                return nil
-            }
-
-            guard let results = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                return nil
-            }
-
-            var total: Double = 0
-            for entry in results {
-                if let fields = (entry["document"] as? [String: Any])?["fields"] as? [String: Any],
-                   let desktopChat = (fields["desktop_chat_builtin"] as? [String: Any])?["mapValue"] as? [String: Any],
-                   let chatFields = desktopChat["fields"] as? [String: Any],
-                   let costField = chatFields["cost_usd"] as? [String: Any] {
-                    if let doubleVal = costField["doubleValue"] as? Double {
-                        total += doubleVal
-                    } else if let intStr = costField["integerValue"] as? String, let intVal = Double(intStr) {
-                        total += intVal
-                    }
-                }
-            }
-
-            log("APIClient: Total builtin cost from Firestore: $\(String(format: "%.4f", total))")
-            return total
-        } catch {
-            log("APIClient: fetchTotalBuiltinCost failed: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    /// Forward LLM usage to the Fazm backend so it can be ingested into Mediar's dashboard.
-    func recordExternalLlmTrace(model: String, inputTokens: Int, outputTokens: Int, totalTokens: Int, source: String) async {
-        guard totalTokens > 0 else { return }
-
-        guard let backendUrl = ProcessInfo.processInfo.environment["FAZM_BACKEND_URL"]?
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/")),
-            !backendUrl.isEmpty else {
-            log("APIClient: recordExternalLlmTrace skipped — missing FAZM_BACKEND_URL")
-            return
-        }
-
-        guard let idToken = try? await AuthService.shared.getIdToken() else {
-            log("APIClient: recordExternalLlmTrace skipped — no ID token")
-            return
-        }
-
-        let body: [String: Any] = [
-            "model": model,
-            "input_tokens": inputTokens,
-            "output_tokens": outputTokens,
-            "total_tokens": totalTokens,
-            "source": source,
-        ]
-
-        do {
-            let jsonData = try JSONSerialization.data(withJSONObject: body)
-            var request = URLRequest(url: URL(string: "\(backendUrl)/v1/llm-usage/mediar-forward")!)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = jsonData
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                log("APIClient: recordExternalLlmTrace failed — invalid response")
-                return
-            }
-
-            if (200...299).contains(httpResponse.statusCode) {
-                log("APIClient: recordExternalLlmTrace success (source=\(source), tokens=\(totalTokens))")
-            } else {
-                let body = String(data: data, encoding: .utf8) ?? ""
-                log("APIClient: recordExternalLlmTrace failed (status \(httpResponse.statusCode)): \(body.prefix(200))")
-            }
-        } catch {
-            log("APIClient: recordExternalLlmTrace failed: \(error.localizedDescription)")
-        }
-    }
+    func recordExternalLlmTrace(model: String, inputTokens: Int, outputTokens: Int, totalTokens: Int, source: String) async {}
 
     // Search
     func searchApps(query: String = "", installedOnly: Bool = false) async throws -> [AppInfo] { [] }
@@ -516,9 +307,7 @@ class APIClient {
     }
 }
 
-// MARK: - Auth & Services
-
-// AuthService moved to AuthService.swift
+// MARK: - Services
 
 class ScreenCaptureService {
     static func checkPermission() -> Bool { CGPreflightScreenCaptureAccess() }
@@ -1079,7 +868,6 @@ class AppProvider: ObservableObject {
 
 // MARK: - Views (Deleted Pages)
 
-// SignInView moved to SignInView.swift
 
 struct DashboardPage: View {
     var viewModel: DashboardViewModel
@@ -1387,7 +1175,6 @@ struct FlowLayout: Layout {
 // MARK: - Notification.Name Extensions
 
 extension Notification.Name {
-    static let userDidSignOut = Notification.Name("com.fazm.desktop.userDidSignOut")
     static let assistantMonitoringStateDidChange = Notification.Name("assistantMonitoringStateDidChange")
 }
 

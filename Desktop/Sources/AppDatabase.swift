@@ -20,7 +20,7 @@ actor AppDatabase {
     /// Path to the running flag file (used to detect unclean shutdown)
     private var runningFlagPath: String?
 
-    /// The user ID this database is configured for (nil = not yet configured → "anonymous")
+    /// The user ID this database is configured for (nil = not yet configured → LocalUser.id)
     private var configuredUserId: String?
 
     /// The user ID that was actually used to open the current database
@@ -29,11 +29,11 @@ actor AppDatabase {
     /// Generation counter — incremented on close() so stale task completions don't corrupt state
     private var initGeneration: Int = 0
 
-    /// Static user ID for nonisolated markCleanShutdown (set by configure(userId:))
+    /// Static user ID for nonisolated markCleanShutdown (set by configure())
     nonisolated(unsafe) static var currentUserId: String?
 
     /// Monotonic counter incremented by configure(). Used by closeIfStale() to detect
-    /// whether a new sign-in session has started since the close was requested.
+    /// whether a new session has started since the close was requested.
     nonisolated(unsafe) static var configureGeneration: Int = 0
 
     /// Runtime error tracking: consecutive SQLITE_IOERR/CORRUPT errors during normal queries.
@@ -101,148 +101,86 @@ actor AppDatabase {
         }
     }
 
-    /// Configure the database for a specific user.
-    /// Does NOT close or reopen the database — call initialize() after this.
-    /// initialize() will detect the user mismatch and reopen if needed.
-    func configure(userId: String?) {
-        let resolvedId = (userId?.isEmpty == false) ? userId! : "anonymous"
-        migrateFromLegacyUserDirectory(to: resolvedId)
-        configuredUserId = resolvedId
-        AppDatabase.currentUserId = resolvedId
-        AppDatabase.configureGeneration += 1
-        log("RewindDatabase: Configured for user \(resolvedId) (generation \(AppDatabase.configureGeneration))")
-    }
-
-    /// Migrate database from legacy user directories (device UUID or "anonymous") to the
-    /// correct Firebase UID directory. This handles the auth_userId → auth_tokenUserId rename.
+    /// Configure the database for the local user.
     ///
-    /// If the target DB doesn't exist, moves the most recent legacy DB into place.
-    /// If the target DB already exists, merges chat_messages from ALL other DBs into it
-    /// (previous sign-out/sign-in cycles created duplicate directories for the same user).
-    private func migrateFromLegacyUserDirectory(to newUserId: String) {
-        let fm = FileManager.default
-        let usersDir = AppPaths.supportRoot
-            .appendingPathComponent("users", isDirectory: true)
-        let targetDir = usersDir.appendingPathComponent(newUserId, isDirectory: true)
-        let targetDB = targetDir.appendingPathComponent("fazm.db")
-
-        // Find all other user directories that have a fazm.db
-        guard let contents = try? fm.contentsOfDirectory(
-            at: usersDir,
-            includingPropertiesForKeys: nil
-        ) else { return }
-
-        let otherDirs: [(url: URL, dbPath: String, modified: Date)] = contents.compactMap { dir in
-            guard dir.lastPathComponent != newUserId else { return nil }
-            let dbFile = dir.appendingPathComponent("fazm.db")
-            guard fm.fileExists(atPath: dbFile.path),
-                  let attrs = try? fm.attributesOfItem(atPath: dbFile.path),
-                  let modified = attrs[.modificationDate] as? Date else { return nil }
-            return (dir, dbFile.path, modified)
-        }
-
-        guard !otherDirs.isEmpty else { return }
-
-        if !fm.fileExists(atPath: targetDB.path) {
-            // Target doesn't exist — move the most recent legacy DB into place
-            let source = otherDirs.max(by: { $0.modified < $1.modified })!
-            do {
-                if fm.fileExists(atPath: targetDir.path) {
-                    try fm.removeItem(at: targetDir)
-                }
-                try fm.moveItem(at: source.url, to: targetDir)
-                log("RewindDatabase: Migrated database from \(source.url.lastPathComponent) to \(newUserId)")
-            } catch {
-                log("RewindDatabase: Failed to migrate database from \(source.url.lastPathComponent): \(error)")
-                return
-            }
-            // Merge remaining DBs into the newly moved target
-            let remaining = otherDirs.filter { $0.url != source.url }
-            if !remaining.isEmpty {
-                let merged = mergeMessagesFromOtherDatabases(remaining.map(\.dbPath), into: targetDB.path)
-                let succeededDirs = remaining.filter { merged.contains($0.dbPath) }.map(\.url)
-                cleanupMergedDirectories(succeededDirs)
-                quarantineFailedMerges(remaining.filter { !merged.contains($0.dbPath) }.map(\.url))
-            }
-        } else {
-            // Target exists — merge messages from all other DBs into it
-            let merged = mergeMessagesFromOtherDatabases(otherDirs.map(\.dbPath), into: targetDB.path)
-            let succeededDirs = otherDirs.filter { merged.contains($0.dbPath) }.map(\.url)
-            cleanupMergedDirectories(succeededDirs)
-            quarantineFailedMerges(otherDirs.filter { !merged.contains($0.dbPath) }.map(\.url))
-        }
+    /// There is exactly one user now, so this takes no argument and always
+    /// resolves to `LocalUser.id`. It is still a call rather than an implicit
+    /// default because the ordering matters: it must run before `initialize()`
+    /// so the legacy-directory adoption below happens while the database is
+    /// closed.
+    func configure() {
+        adoptLegacyUserDirectoryIfNeeded()
+        configuredUserId = LocalUser.id
+        AppDatabase.currentUserId = LocalUser.id
+        AppDatabase.configureGeneration += 1
+        log("RewindDatabase: Configured for user \(LocalUser.id) (generation \(AppDatabase.configureGeneration))")
     }
 
-    /// Merge chat_messages from source databases into the target database.
-    /// Uses INSERT OR IGNORE to skip duplicates (matched by messageId).
-    /// Returns the set of source paths whose merge succeeded — only those are safe to delete.
-    private func mergeMessagesFromOtherDatabases(_ sourcePaths: [String], into targetPath: String) -> Set<String> {
-        var succeeded: Set<String> = []
-        for sourcePath in sourcePaths {
-            var targetDb: OpaquePointer?
-            guard sqlite3_open(targetPath, &targetDb) == SQLITE_OK, let db = targetDb else {
-                log("RewindDatabase: Merge — failed to open target DB for \(sourcePath)")
-                if let targetDb { sqlite3_close(targetDb) }
-                continue
-            }
-
-            let attachSQL = "ATTACH DATABASE '\(sourcePath)' AS source"
-            guard sqlite3_exec(db, attachSQL, nil, nil, nil) == SQLITE_OK else {
-                log("RewindDatabase: Merge — failed to attach \(sourcePath): \(String(cString: sqlite3_errmsg(db)))")
-                sqlite3_close(db)
-                continue
-            }
-
-            let mergeSQL = """
-                INSERT OR IGNORE INTO main.chat_messages
-                    (taskId, messageId, sender, messageText, createdAt, updatedAt, backendSynced)
-                SELECT taskId, messageId, sender, messageText, createdAt, updatedAt, backendSynced
-                FROM source.chat_messages
-            """
-            if sqlite3_exec(db, mergeSQL, nil, nil, nil) == SQLITE_OK {
-                let count = sqlite3_changes(db)
-                log("RewindDatabase: Merged \(count) messages from \(URL(fileURLWithPath: sourcePath).deletingLastPathComponent().lastPathComponent)")
-                succeeded.insert(sourcePath)
-            } else {
-                log("RewindDatabase: Merge — failed to merge messages from \(sourcePath): \(String(cString: sqlite3_errmsg(db)))")
-            }
-
-            sqlite3_exec(db, "DETACH DATABASE source", nil, nil, nil)
-            sqlite3_close(db)
-        }
-        return succeeded
-    }
-
-    /// Remove directories whose merge succeeded.
-    private func cleanupMergedDirectories(_ dirs: [URL]) {
+    /// One-shot, copy-only adoption of the pre-fork user directory.
+    ///
+    /// Before this fork the directory was named after the Firebase UID, e.g.
+    /// `users/i0e5s5mFa6Uq0VxKO5OwdVuXcdA2/fazm.db`, and it holds real chat
+    /// history, cron jobs and cron runs. `LocalUser.id` is a different name, so
+    /// without this the first launch would silently start on an empty database
+    /// and the old one would sit there orphaned.
+    ///
+    /// Deliberately conservative, because getting this wrong destroys data that
+    /// exists nowhere else:
+    ///
+    /// - It **copies**. The source directory is never moved and never deleted,
+    ///   so a bug here costs disk space, not history. The old directory stays
+    ///   as a usable backup.
+    /// - It runs **only when the target does not exist**. Once `users/local`
+    ///   is there, this is a no-op forever, so a later launch cannot merge or
+    ///   overwrite anything.
+    /// - With **more than one** candidate it refuses and logs, rather than
+    ///   guessing which one was live.
+    ///
+    /// This replaces a much more aggressive predecessor that merged every other
+    /// user directory into the target and then *deleted* the ones it believed
+    /// it had merged. That existed to reconcile Firebase UID churn across
+    /// sign-out/sign-in cycles. With a fixed local id there is no churn to
+    /// reconcile, and a delete path over the only copy of the user's history is
+    /// not worth keeping for a case that can no longer arise.
+    private func adoptLegacyUserDirectoryIfNeeded() {
         let fm = FileManager.default
-        for dir in dirs {
-            do {
-                try fm.removeItem(at: dir)
-                log("RewindDatabase: Cleaned up merged directory \(dir.lastPathComponent)")
-            } catch {
-                log("RewindDatabase: Failed to clean up \(dir.lastPathComponent): \(error)")
-            }
-        }
-    }
+        let usersDir = AppPaths.supportRoot.appendingPathComponent("users", isDirectory: true)
+        let targetDir = usersDir.appendingPathComponent(LocalUser.id, isDirectory: true)
 
-    /// Move directories whose merge failed to a quarantine folder so they are not lost.
-    /// They can be recovered manually after the merge logic is fixed.
-    private func quarantineFailedMerges(_ dirs: [URL]) {
-        guard !dirs.isEmpty else { return }
-        let fm = FileManager.default
-        let quarantine = AppPaths.supportRoot
-            .appendingPathComponent("merge-failed", isDirectory: true)
-        try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
-        let stamp = Int(Date().timeIntervalSince1970)
-        for dir in dirs {
-            let dest = quarantine.appendingPathComponent("\(dir.lastPathComponent).\(stamp)", isDirectory: true)
-            do {
-                try fm.moveItem(at: dir, to: dest)
-                log("RewindDatabase: Quarantined failed-merge directory \(dir.lastPathComponent) → merge-failed/\(dest.lastPathComponent)")
-            } catch {
-                log("RewindDatabase: Failed to quarantine \(dir.lastPathComponent): \(error). LEAVING IN PLACE — do not delete.")
+        guard !fm.fileExists(atPath: targetDir.appendingPathComponent("fazm.db").path) else { return }
+
+        guard let contents = try? fm.contentsOfDirectory(at: usersDir, includingPropertiesForKeys: nil) else {
+            return
+        }
+
+        let candidates = contents.filter { dir in
+            dir.lastPathComponent != LocalUser.id
+                && fm.fileExists(atPath: dir.appendingPathComponent("fazm.db").path)
+        }
+
+        guard !candidates.isEmpty else { return }
+        guard candidates.count == 1 else {
+            logError("RewindDatabase: \(candidates.count) legacy user directories present (\(candidates.map(\.lastPathComponent).joined(separator: ", "))) — refusing to guess which one is live. Rename the correct one to '\(LocalUser.id)' by hand.")
+            return
+        }
+
+        let source = candidates[0]
+        do {
+            try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+            // Copy the database and its write-ahead log; the WAL routinely holds
+            // most of the recent content and the database file alone is not the
+            // whole story. The `-shm` shared-memory file is intentionally left
+            // behind: SQLite rebuilds it, and a stale one alongside a fresh WAL
+            // is a liability. `.fazm_running` is a crash-detection flag that
+            // must not be inherited.
+            for name in ["fazm.db", "fazm.db-wal"] {
+                let from = source.appendingPathComponent(name)
+                guard fm.fileExists(atPath: from.path) else { continue }
+                try fm.copyItem(at: from, to: targetDir.appendingPathComponent(name))
             }
+            log("RewindDatabase: adopted legacy user directory \(source.lastPathComponent) → \(LocalUser.id) (source left in place as a backup)")
+        } catch {
+            logError("RewindDatabase: failed to adopt legacy user directory \(source.lastPathComponent)", error: error)
         }
     }
 
@@ -266,18 +204,11 @@ actor AppDatabase {
         log("RewindDatabase: Closed database (generation \(initGeneration))")
     }
 
-    /// Switch to a different user's database.
-    func switchUser(to userId: String?) async throws {
-        close()
-        configure(userId: userId)
-        try await initialize()
-    }
-
     /// Returns the per-user base directory: <AppSupport>/users/{userId}/
     /// Falls back to the static currentUserId (set synchronously at app start) when
     /// configure() hasn't been called yet (e.g., TierManager triggers init early).
     private func userBaseDirectory() -> URL {
-        let userId = configuredUserId ?? AppDatabase.currentUserId ?? "anonymous"
+        let userId = configuredUserId ?? AppDatabase.currentUserId ?? LocalUser.id
         return AppPaths.supportRoot
             .appendingPathComponent("users", isDirectory: true)
             .appendingPathComponent(userId, isDirectory: true)
@@ -285,7 +216,7 @@ actor AppDatabase {
 
     /// Static version of userBaseDirectory for nonisolated markCleanShutdown
     private static func staticUserBaseDirectory() -> URL {
-        let userId = currentUserId ?? "anonymous"
+        let userId = currentUserId ?? LocalUser.id
         return AppPaths.supportRoot
             .appendingPathComponent("users", isDirectory: true)
             .appendingPathComponent(userId, isDirectory: true)
@@ -319,7 +250,7 @@ actor AppDatabase {
     /// If the DB is open for a different user (e.g., "anonymous" before configure was called),
     /// closes it and reopens for the configured user.
     func initialize() async throws {
-        let targetUser = configuredUserId ?? AppDatabase.currentUserId ?? "anonymous"
+        let targetUser = configuredUserId ?? AppDatabase.currentUserId ?? LocalUser.id
 
         // Already initialized for the correct user
         if dbQueue != nil && openedForUserId == targetUser {
@@ -482,7 +413,7 @@ actor AppDatabase {
         }
 
         dbQueue = activeQueue
-        openedForUserId = configuredUserId ?? AppDatabase.currentUserId ?? "anonymous"
+        openedForUserId = configuredUserId ?? AppDatabase.currentUserId ?? LocalUser.id
         consecutiveQueryIOErrors = 0
 
         try migrate(activeQueue)
@@ -525,7 +456,7 @@ actor AppDatabase {
             .appendingPathComponent("users", isDirectory: true)
             .appendingPathComponent("anonymous", isDirectory: true)
 
-        let effectiveUserId = configuredUserId ?? AppDatabase.currentUserId ?? "anonymous"
+        let effectiveUserId = configuredUserId ?? AppDatabase.currentUserId ?? LocalUser.id
         let sourceDir: URL
         if fileManager.fileExists(atPath: legacyDB.path) {
             sourceDir = fazmDir

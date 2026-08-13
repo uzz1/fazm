@@ -171,7 +171,6 @@ struct SettingsContentView: View {
     @State private var transcriptionLanguage: String = AssistantSettings.shared.transcriptionLanguage
     @ObservedObject private var audioDeviceManager = AudioDeviceManager.shared
     @ObservedObject private var shortcutSettings = ShortcutSettings.shared
-    @ObservedObject private var authState = AuthState.shared
     @ObservedObject private var mcpServerManager = MCPServerManager.shared
     @ObservedObject private var codexBackend = CodexBackendManager.shared
     @State private var showAddMCPServer = false
@@ -3348,7 +3347,7 @@ struct SettingsContentView: View {
                     Spacer()
 
                     Button(action: {
-                        FeedbackWindow.show(userEmail: AuthState.shared.userEmail)
+                        FeedbackWindow.show(userEmail: LocalUser.email)
                     }) {
                         Text("Report")
                             .scaledFont(size: 13, weight: .medium)
@@ -3514,7 +3513,7 @@ struct SettingsContentView: View {
                     Spacer()
 
                     Button("Report") {
-                        FeedbackWindow.show(userEmail: AuthState.shared.userEmail)
+                        FeedbackWindow.show(userEmail: LocalUser.email)
                     }
                     .buttonStyle(.bordered)
                 }

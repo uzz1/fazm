@@ -41,7 +41,7 @@ enum InstanceLock {
     /// Acquire the lock or hand off to a running peer. Call this from
     /// `applicationWillFinishLaunching` (BEFORE any heavy init) so a
     /// duplicate launch terminates fast and clean, before we wire up
-    /// hotkey monitors / Firebase / SQLite / the ACP bridge.
+    /// hotkey monitors / SQLite / the ACP bridge.
     ///
     /// Behavior:
     /// - Dev build: no-op, returns true.

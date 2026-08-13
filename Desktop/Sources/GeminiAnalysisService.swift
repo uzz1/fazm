@@ -460,9 +460,9 @@ actor GeminiAnalysisService {
     private func gatherUserContext() async -> String {
         var sections: [String] = []
 
-        // User identity (AuthService is not Sendable — read on main actor)
+        // User identity
         let userName = await MainActor.run {
-            AuthService.shared.displayName.isEmpty ? "Unknown" : AuthService.shared.displayName
+            LocalUser.displayName.isEmpty ? "Unknown" : LocalUser.displayName
         }
         let timezone = TimeZone.current.identifier
         let dateFormatter = DateFormatter()

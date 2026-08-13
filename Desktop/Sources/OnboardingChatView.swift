@@ -641,9 +641,9 @@ struct OnboardingChatView: View {
             startExploration(fileCount: fileCount, graphViewModel: graphViewModel)
         }
         // Build onboarding system prompt
-        let userName = AuthService.shared.displayName
-        let givenName = AuthService.shared.givenName.isEmpty ? userName : AuthService.shared.givenName
-        let email = AuthState.shared.userEmail ?? ""
+        let userName = LocalUser.displayName
+        let givenName = LocalUser.givenName.isEmpty ? userName : LocalUser.givenName
+        let email = LocalUser.email ?? ""
 
         let systemPrompt = ChatPromptBuilder.buildOnboardingChat(
             userName: userName,
@@ -676,10 +676,8 @@ struct OnboardingChatView: View {
                 // Start bridge eagerly so it's ready by the time we need to send
                 async let bridgeWarmup: () = chatProvider.warmupBridge()
 
-                // Ensure DB is ready before loading messages — must configure with
-                // the signed-in user's ID so we open the correct database file
-                let userId = UserDefaults.standard.string(forKey: "auth_tokenUserId")
-                await AppDatabase.shared.configure(userId: userId)
+                // Ensure DB is ready before loading messages.
+                await AppDatabase.shared.configure()
                 try? await AppDatabase.shared.initialize()
 
                 // Load previous messages from local database
@@ -780,8 +778,7 @@ struct OnboardingChatView: View {
                 // Persist the static welcome for restart recovery, then warm the
                 // bridge in the background so the first agent turn (on the user's
                 // tap) is fast. Not awaited against the UI — the screen is already up.
-                let userId = UserDefaults.standard.string(forKey: "auth_tokenUserId")
-                await AppDatabase.shared.configure(userId: userId)
+                await AppDatabase.shared.configure()
                 try? await AppDatabase.shared.initialize()
                 await OnboardingChatPersistence.saveMessage(welcomeMsg)
                 await OnboardingChatPersistence.saveMessage(safetyMsg)
@@ -992,7 +989,7 @@ struct OnboardingChatView: View {
         log("OnboardingChat: Starting parallel explorations (\(fileCount) files indexed)")
         AnalyticsManager.shared.onboardingChatToolUsed(tool: "exploration_started", properties: ["file_count": fileCount])
 
-        let userName = AuthService.shared.displayName
+        let userName = LocalUser.displayName
 
         // Session 1: Knowledge graph builder (graph-focused, no text output needed)
         graphTask = Task {

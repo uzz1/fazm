@@ -289,7 +289,7 @@ class MemoryGraphViewModel: ObservableObject {
         guard !isEmpty else { return }
 
         // Cap to top nodes by connection count for rendering performance
-        let userName = AuthService.shared.displayName.isEmpty ? nil : AuthService.shared.givenName
+        let userName = LocalUser.displayName.isEmpty ? nil : LocalUser.givenName
         response = capGraphResponse(response, maxNodes: maxVisibleNodes, userNodeLabel: userName)
 
         // Populate simulation with user node at center
@@ -353,7 +353,7 @@ class MemoryGraphViewModel: ObservableObject {
         isEmpty = false
 
         // Cap the response before feeding to simulation
-        let userName = AuthService.shared.displayName.isEmpty ? nil : AuthService.shared.givenName
+        let userName = LocalUser.displayName.isEmpty ? nil : LocalUser.givenName
         response = capGraphResponse(response, maxNodes: maxVisibleNodes, userNodeLabel: userName)
 
         let previousNodeCount = simulation.nodes.count

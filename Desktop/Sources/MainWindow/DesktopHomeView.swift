@@ -3,28 +3,17 @@ import SwiftUI
 struct DesktopHomeView: View {
     @StateObject private var appState = AppState()
     @StateObject private var viewModelContainer = ViewModelContainer()
-    @ObservedObject private var authState = AuthState.shared
 
     // Settings sidebar state
     @State private var selectedSettingsSection: SettingsContentView.SettingsSection = .conversationHistory
     @State private var selectedAdvancedSubsection: SettingsContentView.AdvancedSubsection? = nil
     @State private var highlightedSettingId: String? = nil
 
-    // `signin-optional` experiment gate. While false, suppresses rendering of
-    // SignInView so we have a chance to evaluate the PostHog feature flag and
-    // (for variant B) sign the user in anonymously without ever showing the
-    // wall. Flips to true once the gate has been decided — either anonymous
-    // sign-in succeeded, failed, or the user is in the control cohort.
-    @State private var signInGateDecided = false
-
     var body: some View {
         Group {
-            if !signInGateDecided && !authState.isSignedIn {
-                signInGateLoadingView
-                    .task { await evaluateSignInGate() }
-            } else if !authState.isSignedIn {
-                SignInView(authState: authState)
-            } else if !appState.hasCompletedOnboarding {
+            // No sign-in gate: the user is `LocalUser`, always, so the first
+            // thing a fresh launch sees is onboarding.
+            if !appState.hasCompletedOnboarding {
                 if shouldSkipOnboarding() {
                     Color.clear.onAppear {
                         log("DesktopHomeView: --skip-onboarding flag detected, skipping onboarding")
@@ -67,18 +56,11 @@ struct DesktopHomeView: View {
                             PushToTalkManager.shared.setup(barState: barState)
                         }
 
-                        // After onboarding or sign-in, close the main window — just show floating bar
+                        // After onboarding, close the main window — just show floating bar
                         let justOnboarded = UserDefaults.standard.bool(forKey: "onboardingJustCompleted")
-                        let justSignedIn = UserDefaults.standard.bool(forKey: "signInJustCompleted")
-                        if justOnboarded || justSignedIn {
-                            if justOnboarded {
-                                UserDefaults.standard.set(false, forKey: "onboardingJustCompleted")
-                                log("DesktopHomeView: Post-onboarding — closing main window, showing floating bar only")
-                            }
-                            if justSignedIn {
-                                UserDefaults.standard.set(false, forKey: "signInJustCompleted")
-                                log("DesktopHomeView: Post-sign-in — closing main window, showing floating bar only")
-                            }
+                        if justOnboarded {
+                            UserDefaults.standard.set(false, forKey: "onboardingJustCompleted")
+                            log("DesktopHomeView: Post-onboarding — closing main window, showing floating bar only")
                             // Ensure floating bar is visible
                             if !FloatingControlBarManager.shared.isEnabled {
                                 FloatingControlBarManager.shared.show()
@@ -95,10 +77,6 @@ struct DesktopHomeView: View {
                     .task {
                         await viewModelContainer.loadAllData()
                     }
-                    .onReceive(NotificationCenter.default.publisher(for: .userDidSignOut)) { _ in
-                        log("DesktopHomeView: userDidSignOut — resetting hasCompletedOnboarding")
-                        appState.hasCompletedOnboarding = false
-                    }
             }
         }
         .background(FazmColors.backgroundPrimary)
@@ -106,8 +84,8 @@ struct DesktopHomeView: View {
         .tint(FazmColors.purplePrimary)
         // A `.task(id: authState.isSignedIn)` used to sit here running the hard
         // subscription gate the moment auth flipped to signed-in. Both halves
-        // are gone: there is no sign-in to key the task on, and the Stripe
-        // status endpoint it called needed an ID token no local user can mint.
+        // are gone: there is no sign-in to key a task on, and the Stripe status
+        // endpoint it called needed an ID token no local user can mint.
         // Observe ChatProvider flags
         .onReceive(viewModelContainer.chatProvider.$needsBrowserExtensionSetup) { needs in
             if needs {
@@ -139,56 +117,6 @@ struct DesktopHomeView: View {
                 }
             }
         }
-    }
-
-    // MARK: - Sign-In Gate (signin-optional experiment)
-
-    /// Brief placeholder shown while the `signin-optional` PostHog flag is
-    /// evaluated and (for variant B) anonymous sign-in completes. Avoids a
-    /// flash of SignInView before we know which cohort the user is in.
-    private var signInGateLoadingView: some View {
-        ZStack {
-            FazmColors.backgroundPrimary
-            ProgressView()
-                .controlSize(.large)
-                .tint(FazmColors.purplePrimary)
-        }
-    }
-
-    /// Read the `signin-optional` PostHog flag, emit an exposure event, and
-    /// for the treatment cohort sign the user in anonymously so the rest of
-    /// the app sees an authenticated UID without a wall. Sets
-    /// `signInGateDecided = true` exactly once per launch so the body falls
-    /// through to either onboarding (sign-in succeeded) or SignInView (control
-    /// cohort, or anonymous sign-in failed).
-    @MainActor
-    private func evaluateSignInGate() async {
-        guard !signInGateDecided else { return }
-
-        let flag = await PostHogManager.shared.evaluateFeatureFlagAfterReload("signin-optional")
-        let flagEnabled = flag.enabled
-        let variant = flagEnabled ? "treatment" : "control"
-        let deviceId = UserDefaults.standard.string(forKey: "analytics_device_id") ?? ""
-        PostHogManager.shared.track("signin_optional_exposed", properties: [
-            "variant": variant,
-            "device_id": deviceId,
-            "flag_resolved": flag.resolved,
-            "flag_value": flag.valueDescription
-        ])
-        log("DesktopHomeView: signin-optional gate evaluated — variant=\(variant), flag_resolved=\(flag.resolved), flag_value=\(flag.valueDescription)")
-
-        if flagEnabled {
-            do {
-                try await AuthService.shared.signInAnonymously()
-                // AuthState.isSignedIn flips to true via the post-auth cascade;
-                // the next render passes through to onboarding/settings.
-                UserDefaults.standard.set(true, forKey: "signInJustCompleted")
-            } catch {
-                log("DesktopHomeView: anonymous sign-in failed (\(error.localizedDescription)) — falling back to SignInView")
-            }
-        }
-
-        signInGateDecided = true
     }
 
     private var settingsContent: some View {

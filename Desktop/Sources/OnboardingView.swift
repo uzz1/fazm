@@ -332,7 +332,7 @@ struct OnboardingPrivacySheet: View {
                                     .cornerRadius(3)
                             }
 
-                            Text("All data transmitted to our servers is encrypted in transit (TLS) and at rest using Google Cloud infrastructure. Authentication is handled via Google Sign-In and Firebase — we never see or store your Google password.")
+                            Text("There is no account and no sign-in. Your identity never leaves this Mac, and nothing is transmitted to a Fazm server on your behalf.")
                                 .scaledFont(size: 11)
                                 .foregroundColor(FazmColors.textTertiary)
                                 .fixedSize(horizontal: false, vertical: true)
