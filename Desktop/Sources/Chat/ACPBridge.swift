@@ -2410,7 +2410,7 @@ actor ACPBridge {
       attributes: [.posixPermissions: 0o700]
     )
 
-    return [
+    var environment = [
       "DESKPILOT_OFFLINE": "1",
       "DESKPILOT_HERMES_PYTHON": python,
       "HERMES_HOME": hermesHome.path,
@@ -2418,6 +2418,21 @@ actor ACPBridge {
       "DESKPILOT_STATUS_SOCKET": runDirectory.appendingPathComponent("hermes-status.sock").path,
       "LM_API_KEY": apiKey,
     ]
+
+    // Optional seventh value, deliberately not part of the all-or-nothing set
+    // above: `hermesConfig()` does not need it. It tells Hermes' UI-lease
+    // reader which config the *policy server* was started with, so both sides
+    // agree on one closed code-identity allowlist. Omitting it is safe — the
+    // reader then falls back to the production identity alone, never wider.
+    let configuredPath = defaults.string(forKey: "deskpilotConfigPath").flatMap {
+      $0.isEmpty ? nil : URL(fileURLWithPath: $0)
+    }
+    let installedPath = home.appendingPathComponent(".deskpilot/config/deskpilot.yaml")
+    if let configPath = configuredPath ?? (fileManager.isReadableFile(atPath: installedPath.path) ? installedPath : nil),
+       fileManager.isReadableFile(atPath: configPath.path) {
+      environment["DESKPILOT_CONFIG"] = configPath.path
+    }
+    return environment
   }
 
   static func makeBridgeEnvironment(mode: BridgeMode, nodePath: String) async -> [String: String] {

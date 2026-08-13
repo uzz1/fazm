@@ -646,6 +646,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Clean up old screenshots in the background
         Task.detached { ScreenCaptureManager.cleanupOldScreenshots() }
 
+        // Publish the DeskPilot local-UI lease. Hermes refuses to create or
+        // prompt any session without it, and only this process can register it:
+        // the policy server verifies the code signature of its socket peer, so
+        // a Node or Python child would present the wrong identity. No-op unless
+        // `deskpilotOfflineEnabled` is set.
+        DeskPilotUILease.start()
+
         // Mark successful launch — resets the crash-loop counter.
         // Must be at the END of applicationDidFinishLaunching so that crashes during
         // any of the above init still count toward the crash-loop threshold.
@@ -1203,6 +1210,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Release the single-instance lock first so a relaunch can acquire it
         // even if downstream cleanup hangs. Idempotent + guarded by PID check.
         InstanceLock.release()
+
+        // Withdraw the DeskPilot UI lease. The record names this PID, so a file
+        // that outlives the process would point Hermes at a dead or recycled one.
+        DeskPilotUILease.stop()
 
         // Freeze detached window registry before windows tear down
         DetachedChatWindowController.shared.prepareForTermination()
