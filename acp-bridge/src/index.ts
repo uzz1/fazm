@@ -39,6 +39,7 @@ import type {
   WarmupMessage,
   AuthMethod,
 } from "./protocol.js";
+import { deskpilotOffline, offlineMcpServers } from "./deskpilot-mode.js";
 import { startOAuthFlow, OAuthTokenExchangeError, readStoredCredentials, type OAuthFlowHandle } from "./oauth-flow.js";
 import { startCodexOAuthFlow, type CodexOAuthFlowHandle } from "./codex-oauth-flow.js";
 import { CodexProvider } from "./codex-provider.js";
@@ -2493,6 +2494,12 @@ type McpServerConfig = McpServerConfigStdio | McpServerConfigHttp;
  *                     (set by Swift at bridge spawn) when omitted.
  */
 function buildMcpServers(mode: string, cwd?: string, sessionKey?: string, activeModel?: string): McpServerConfig[] {
+  // DeskPilot offline mode: Hermes owns every downstream tool behind the policy
+  // gate. Registering Fazm's bundled servers — the Playwright extension flow,
+  // mcp-server-macos-use, hosted-provider MCPs, or the fazm_tools relay — would
+  // hand the model a second execution path that policy never sees.
+  if (deskpilotOffline()) return offlineMcpServers();
+
   const servers: McpServerConfig[] = [];
 
   // fazm-tools (stdio, connects back via Unix socket)
@@ -6350,6 +6357,12 @@ process.stdout.on("error", (err) => {
 // --- Main ---
 
 async function main(): Promise<void> {
+  if (deskpilotOffline()) {
+    // One agent process, no bundled downstream execution. Resolving paths for
+    // servers that will never be registered would only invite drift.
+    logErr("DeskPilot offline mode: Hermes is the only agent; no bundled MCP servers registered");
+  }
+
   // Log MCP server versions at startup for diagnostics
   let playwrightVersion = "unknown";
   try {
@@ -6402,8 +6415,10 @@ async function main(): Promise<void> {
   // Check Google Workspace MCP availability (venv bundled in app)
   logErr(`Google Workspace MCP: ${existsSync(googleWorkspaceMcpPython) ? "ready" : "not available"}`);
 
-  // Log browser diagnostics for debugging Playwright connection issues
-  try {
+  // Log browser diagnostics for debugging Playwright connection issues.
+  // Skipped offline: this shells out to Chrome and probes port 9222, neither of
+  // which exists in a DeskPilot install, and Hermes drives the web via BrowserOS.
+  if (!deskpilotOffline()) try {
     const { execSync } = await import("child_process");
     const { readdirSync } = await import("fs");
     const { homedir } = await import("os");
