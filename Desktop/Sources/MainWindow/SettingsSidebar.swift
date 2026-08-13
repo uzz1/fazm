@@ -34,9 +34,6 @@ struct SettingsSearchItem: Identifiable {
         SettingsSearchItem(name: "Voice Response", subtitle: "AI speaks responses aloud using text-to-speech", keywords: ["voice", "tts", "text to speech", "speak", "audio", "sound", "speed", "voice language", "auto-detect", "manual", "language"], section: .general, advancedSubsection: nil, icon: "speaker.wave.2.fill", settingId: "general.voiceresponse"),
 
         // Remote Control
-        SettingsSearchItem(name: "Connect Your Phone", subtitle: "Control Fazm from your phone via chat.fazm.ai", keywords: ["phone", "remote", "mobile", "qr code", "relay", "websocket", "remote control"], section: .remoteControl, advancedSubsection: nil, icon: "iphone", settingId: "remotecontrol.connect"),
-        SettingsSearchItem(name: "Connection Status", subtitle: "Phone relay and connection status", keywords: ["status", "connected", "online", "relay", "phone"], section: .remoteControl, advancedSubsection: nil, icon: "antenna.radiowaves.left.and.right", settingId: "remotecontrol.status"),
-        SettingsSearchItem(name: "How It Works", subtitle: "Steps to connect your phone to Fazm", keywords: ["how it works", "instructions", "setup steps", "connect phone"], section: .remoteControl, advancedSubsection: nil, icon: "questionmark.circle", settingId: "remotecontrol.howitworks"),
 
         // Permissions
         SettingsSearchItem(name: "Permissions", subtitle: "Manage screen recording, microphone, and accessibility permissions", keywords: ["permissions", "screen recording", "microphone", "accessibility", "privacy", "security"], section: .permissions, advancedSubsection: nil, icon: "lock.shield", settingId: "permissions.permissions"),
@@ -296,7 +293,6 @@ struct SettingsSidebarItem: View {
         case .home: return "menubar.dock.rectangle"
         case .routines: return "repeat.circle"
         case .discoveredTasks: return "wand.and.stars"
-        case .remoteControl: return "iphone"
         case .general: return "gearshape"
         case .shortcuts: return "keyboard"
         case .permissions: return "lock.shield"

@@ -719,11 +719,11 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Lightweight restart: re-enter onboarding without signing out or resetting permissions.
-    /// Keeps the user signed in, keeps granted permissions, just clears onboarding completion
-    /// so the user goes through the onboarding chat again.
+    /// Lightweight restart: re-enter onboarding without resetting permissions.
+    /// Keeps granted permissions, just clears onboarding completion so the user
+    /// goes through the onboarding chat again.
     func restartOnboarding() {
-        log("AppState: Restarting onboarding (lightweight — keeping sign-in and permissions)")
+        log("AppState: Restarting onboarding (lightweight — keeping permissions)")
         hasCompletedOnboarding = false
         UserDefaults.standard.removeObject(forKey: "onboardingWasSkipped")
         OnboardingChatPersistence.clear()

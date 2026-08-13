@@ -781,7 +781,6 @@ class ChatProvider: ObservableObject {
     @AppStorage("bridgeMode") var bridgeMode: String = "builtin"
 
     // MARK: - Web Relay (phone → desktop tunnel)
-    let webRelay = WebRelay()
 
     // MARK: - Bridge (prefers user's Claude session, falls back to bundled Anthropic API key)
     private lazy var acpBridge: ACPBridge = {
@@ -1312,9 +1311,6 @@ class ChatProvider: ObservableObject {
                 }
             }
 
-        // Start web relay for phone → desktop tunnel
-        setupWebRelay()
-
         // Kill ACP bridge subprocess on app quit to prevent orphaned Node.js processes.
         // This runs synchronously (stop() is sync) to ensure cleanup completes before exit.
         terminationObserver = NotificationCenter.default.addObserver(
@@ -1323,7 +1319,6 @@ class ChatProvider: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             MainActor.assumeIsolated {
-                self.webRelay.stop()
                 let bridge = self.acpBridge
                 Task.detached { await bridge.stop() }
             }
@@ -1350,159 +1345,13 @@ class ChatProvider: ObservableObject {
 
     private var terminationObserver: NSObjectProtocol?
 
-    // MARK: - Web Relay Setup
-
-    private func setupWebRelay() {
-        webRelay.onQuery = { [weak self] text, sessionKey in
-            guard let self else { return }
-
-            // Wire ask_followup suggestions through to the phone for this session key.
-            // ChatToolExecutor.executeAskFollowup looks up quickReplyCallbacks[sessionKey]
-            // when the model invokes ask_followup; we hand it a closure that pushes the
-            // question + option pills over the WebSocket to the phone.
-            ChatToolExecutor.registerCallbacks(
-                sessionKey: sessionKey,
-                onQuickReply: { [weak self] question, options in
-                    Task { @MainActor [weak self] in
-                        self?.webRelay.sendToPhone([
-                            "type": "suggestions",
-                            "question": question,
-                            "options": options,
-                        ])
-                    }
-                }
-            )
-
-            await self.sendMessage(text, sessionKey: sessionKey)
-        }
-
-        webRelay.onHistoryRequest = { [weak self] requestedSessionKey in
-            guard let self else { return [] }
-            // Source-of-truth differs between the two flavours of session:
-            //  - Floating bar (nil / "main" / "floating"): provider.messages is
-            //    populated live AND restored from ChatMessageStore on launch via
-            //    restoreFloatingChatIfNeeded(), so the in-memory array is reliable.
-            //  - Detached pop-outs ("detached-<uuid>"): on app restart, pop-out
-            //    messages are loaded directly into the per-window streaming state
-            //    (state.streaming.chatHistory) and the persisted store, but NOT
-            //    back-populated into provider.messages. Filtering provider.messages
-            //    by that key therefore returns 0 rows for any restored pop-out the
-            //    user hasn't sent into during the current app run. Pull from the
-            //    in-memory chatHistory (preferred, mirrors what the pop-out window
-            //    itself shows) and fall back to ChatMessageStore when the window
-            //    isn't currently open or its history hasn't hydrated yet.
-            if let key = requestedSessionKey, key.hasPrefix("detached-") {
-                // The persisted store is the authoritative source for pop-out
-                // history. `state.streaming.chatHistory` is derived via
-                // `loadHistory(from:)` which pair-walks user→ai messages and
-                // silently drops any orphan that doesn't have a partner (e.g.
-                // a system card between two user messages, or an ai-only row).
-                // Reading from the DB avoids that lossy reshape and matches
-                // exactly what the pop-out window itself was hydrated from.
-                let saved = await ChatMessageStore.loadMessages(
-                    context: "__\(key)__",
-                    limit: 200
-                )
-                var out: [[String: Any]] = saved.map { msg in
-                    [
-                        "id": msg.id,
-                        "text": msg.text,
-                        "sender": msg.sender == .user ? "user" : "ai",
-                    ] as [String: Any]
-                }
-                // If the pop-out is currently mid-stream, the partial AI
-                // response isn't in the DB yet (only persisted on completion).
-                // Append the live state so the web client sees the streaming
-                // text without waiting for the response to finish.
-                if let entry = DetachedChatWindowController.shared
-                    .entriesSnapshot()
-                    .first(where: { $0.sessionKey == key }) {
-                    let streaming = entry.window.state.streaming
-                    let dq = streaming.displayedQuery
-                    if !dq.isEmpty {
-                        let lastUserText = out
-                            .last(where: { ($0["sender"] as? String) == "user" })?["text"] as? String
-                        if lastUserText != dq {
-                            out.append([
-                                "id": "u-live-\(dq.hashValue)",
-                                "text": dq,
-                                "sender": "user",
-                            ])
-                        }
-                    }
-                    if let live = streaming.currentAIMessage, !live.text.isEmpty {
-                        // Skip if the AI message id is already in `out` (i.e.
-                        // it was persisted while we were reading). Identity is
-                        // the safest comparison; falls back to text otherwise.
-                        let alreadyHave = out.contains { ($0["id"] as? String) == live.id }
-                        if !alreadyHave {
-                            out.append([
-                                "id": live.id,
-                                "text": live.text,
-                                "sender": "ai",
-                            ])
-                        }
-                    }
-                }
-                return out
-            }
-            // Floating bar / main: in-memory filter is correct.
-            let filtered = self.messages.filter { msg in
-                let key = msg.sessionKey ?? "floating"
-                return key == "floating" || key == "main"
-            }
-            return filtered.map { msg in
-                [
-                    "id": msg.id,
-                    "text": msg.text,
-                    "sender": msg.sender == .user ? "user" : "ai",
-                ] as [String: Any]
-            }
-        }
-
-        // Push current desktop state on demand. Web client uses this to drive its
-        // header (model picker, workspace input, voice toggle) and to know which
-        // models are available without hardcoding the list.
-        webRelay.onStateRequest = {
-            let workspace = UserDefaults.standard.string(forKey: "aiChatWorkingDirectory") ?? ""
-            let voiceEnabled = UserDefaults.standard.bool(forKey: "voiceResponseEnabled")
-            let availableModels = ShortcutSettings.shared.availableModels.map { m in
-                ["id": m.id, "label": m.label, "shortLabel": m.shortLabel] as [String: Any]
-            }
-            // Recent workspaces (MRU), filtered the same way the desktop dropdown is:
-            // drop the current workspace, the home dir, and any path that no longer
-            // exists as a directory. Each entry carries the full path plus the last
-            // folder name so the web client can render it like the pop-out chat.
-            let home = NSHomeDirectory()
-            let recentWorkspaces = RecentWorkspaces.list().filter { path in
-                guard !path.isEmpty, path != workspace, path != home else { return false }
-                var isDir: ObjCBool = false
-                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
-            }.map { path in
-                ["path": path, "name": (path as NSString).lastPathComponent] as [String: Any]
-            }
-            return [
-                "model": ShortcutSettings.shared.selectedModel,
-                "modelLabel": ShortcutSettings.shared.selectedModelShortLabel,
-                "workspace": workspace,
-                "voiceEnabled": voiceEnabled,
-                "availableModels": availableModels,
-                "recentWorkspaces": recentWorkspaces,
-            ] as [String: Any]
-        }
-
-        // Enumerate open pop-outs so the web client can list them in its "Stream to"
-        // selector. Reuses the same summary used by the listPopOuts control command.
-        webRelay.onPopOutsRequest = {
-            return DetachedChatWindowController.shared.popOutsSummary().map { $0.asDictionary }
-        }
-
-        // Start web relay — findNode() calls NodeBinaryHelper which does blocking I/O,
-        // but that's moved off the main thread inside WebRelay.start() (FAZM-9W fix).
-        Task { @MainActor in
-            webRelay.start()
-        }
-    }
+    // The phone relay lived here. `setupWebRelay()` stood up a local WebSocket
+    // server and a cloudflared tunnel, then published the tunnel URL to
+    // `${FAZM_BACKEND_URL}/api/relay/register` with a Firebase ID token so
+    // chat.fazm.ai could route a phone to this Mac. The phone side signed in
+    // with the same Google account. None of that survives the removal of
+    // accounts, and a tunnel nothing can discover is a subprocess and a public
+    // hostname for no benefit — so the relay is gone rather than left running.
 
     /// Pre-start the active bridge so the first query doesn't wait for process launch
     func warmupBridge() async {
@@ -4613,7 +4462,6 @@ class ChatProvider: ObservableObject {
                     }
                     self?.appendToMessage(id: aiMessageId, text: delta)
                     // Forward to phone
-                    self?.webRelay.sendToPhone(["type": "text_delta", "text": delta])
                 }
             }
             let toolCallHandler: ACPBridge.ToolCallHandler = { callId, name, input in
@@ -4638,7 +4486,6 @@ class ChatProvider: ObservableObject {
                 Task { @MainActor [weak self] in
                     lastActivityTime = Date()
                     // Forward to phone
-                    self?.webRelay.sendToPhone(["type": "tool_activity", "name": name, "status": status])
                     self?.addToolActivity(
                         messageId: aiMessageId,
                         toolName: name,
@@ -5278,7 +5125,6 @@ class ChatProvider: ObservableObject {
                 clearStallIndicator(forResolvedKey: effectiveKey)
 
                 // Forward final result to phone
-                webRelay.sendToPhone(["type": "result", "text": messageText])
 
                 // Persist AI message locally before yielding. The yield below lets
                 // the Combine $messages sink run, which may call clearTransferredMessages()

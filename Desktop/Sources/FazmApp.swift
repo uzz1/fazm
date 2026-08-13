@@ -244,8 +244,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AnalyticsManager.shared.identify()
         AnalyticsManager.shared.reportAllSettingsIfNeeded()
 
-        // Test trigger: re-enter onboarding without signing out or resetting permissions.
-        // Lightweight reset — keeps sign-in + permissions, just flips hasCompletedOnboarding
+        // Test trigger: re-enter onboarding without resetting permissions.
+        // Lightweight reset — keeps permissions, just flips hasCompletedOnboarding
         // and clears persisted onboarding chat state so the user sees OnboardingView again.
         // Legacy: xcrun swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("com.fazm.testOnboarding"), object: nil, userInfo: nil, deliverImmediately: true); RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.0))'
         // Bundle-scoped: replace `com.fazm.testOnboarding` with `com.fazm.desktop-dev.testOnboarding` (dev) or `com.fazm.app.testOnboarding` (prod).
