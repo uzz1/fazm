@@ -4,7 +4,6 @@ import AuthenticationServices
 import CryptoKit
 @preconcurrency import FirebaseAuth
 import FirebaseCore
-import Sentry
 
 // MARK: - AuthError
 
@@ -967,7 +966,6 @@ class AuthService: NSObject {
 
         saveAuthState()
         updateAuthState()
-        setSentryUserContext()
         setPostHogUserContext()
 
         // Fetch API keys from backend now that user is authenticated
@@ -1140,7 +1138,6 @@ class AuthService: NSObject {
         }
 
         // Clear Sentry user context
-        SentrySDK.setUser(nil)
 
         // Reset PostHog identity so post-signOut anonymous activity does not
         // get attributed to the user who just signed out. Without this, if
@@ -1204,7 +1201,6 @@ class AuthService: NSObject {
 
         if isSignedIn {
             log("AuthService: Restored auth state (userId: \(userId ?? "nil"), email: \(userEmail ?? "nil"))")
-            setSentryUserContext()
             setPostHogUserContext()
             Task { await KeyService.shared.fetchKeys() }
             // Don't call updateAuthState() here — AuthState.init() already restored
@@ -1234,15 +1230,6 @@ class AuthService: NSObject {
         guard stored && !isSignedIn else { return }
         log("AuthService: auth state desync detected (stored=true, tokens missing); signing out")
         signOut()
-    }
-
-    /// Set Sentry user context for crash reporting.
-    private func setSentryUserContext() {
-        guard let userId = userId else { return }
-        let sentryUser = User(userId: userId)
-        sentryUser.email = userEmail
-        sentryUser.username = displayName.isEmpty ? nil : displayName
-        SentrySDK.setUser(sentryUser)
     }
 
     /// Link authenticated user to PostHog for analytics attribution.

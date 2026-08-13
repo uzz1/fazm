@@ -1,36 +1,16 @@
 import SwiftUI
-import Sentry
 
 /// Window controller for the feedback dialog
 @MainActor
 class FeedbackWindow {
     private static var window: NSWindow?
 
+    /// Records a user report locally. The Sentry upload this used to perform was
+    /// removed with the SDK; the app log is now the only destination.
     static func sendSilently() {
         AnalyticsManager.shared.feedbackOpened(source: "silent")
-
-        let sentryMessage = "User Report (logs only)"
-
-        SentrySDK.capture(message: sentryMessage) { scope in
-            // Ensure user context is on this event (global setUser can be missed)
-            if let email = AuthState.shared.userEmail {
-                let user = User()
-                user.email = email
-                user.userId = AuthService.shared.userId
-                user.username = AuthService.shared.displayName.isEmpty ? nil : AuthService.shared.displayName
-                scope.setUser(user)
-            }
-            let isDev = Bundle.main.bundleIdentifier?.hasSuffix("-dev") == true
-            let logPath = isDev ? "/tmp/fazm-dev.log" : "/tmp/fazm.log"
-            let logFilename = isDev ? "fazm-dev.log" : "fazm.log"
-            if FileManager.default.fileExists(atPath: logPath) {
-                let attachment = Attachment(path: logPath, filename: logFilename, contentType: "text/plain")
-                scope.addAttachment(attachment)
-            }
-        }
-
         AnalyticsManager.shared.feedbackSubmitted(feedbackLength: 0, source: "silent")
-        log("Silent user report submitted to Sentry (logs attached)")
+        log("User report recorded locally (silent; no remote destination)")
     }
 
     static func show(userEmail: String? = nil) {
@@ -158,36 +138,7 @@ struct FeedbackView: View {
 
         AnalyticsManager.shared.feedbackSubmitted(feedbackLength: message.count)
 
-        let sentryMessage = message.isEmpty ? "User Report (logs only)" : "User Report: \(message)"
-
-        let eventId = SentrySDK.capture(message: sentryMessage) { scope in
-            // Ensure user context is on this event (global setUser can be missed)
-            let user = User()
-            user.email = email.trimmingCharacters(in: .whitespacesAndNewlines)
-            user.userId = AuthService.shared.userId
-            user.username = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name.trimmingCharacters(in: .whitespacesAndNewlines)
-            scope.setUser(user)
-
-            let isDev = Bundle.main.bundleIdentifier?.hasSuffix("-dev") == true
-            let logPath = isDev ? "/tmp/fazm-dev.log" : "/tmp/fazm.log"
-            let logFilename = isDev ? "fazm-dev.log" : "fazm.log"
-            if FileManager.default.fileExists(atPath: logPath) {
-                let attachment = Attachment(path: logPath, filename: logFilename, contentType: "text/plain")
-                scope.addAttachment(attachment)
-            }
-        }
-
-        if !message.isEmpty {
-            let feedback = SentryFeedback(
-                message: message,
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                email: email.trimmingCharacters(in: .whitespacesAndNewlines),
-                associatedEventId: eventId
-            )
-            SentrySDK.capture(feedback: feedback)
-        }
-
-        log("User report submitted to Sentry (logs attached, message: \(message.isEmpty ? "none" : "yes"))")
+        log("User report recorded locally (message: \(message.isEmpty ? "none" : "yes")); no remote destination")
 
         withAnimation {
             showSuccess = true

@@ -1,5 +1,4 @@
 import Foundation
-import Sentry
 
 private let logFile: String = {
     let isDev = Bundle.main.bundleIdentifier?.hasSuffix("-dev") == true
@@ -121,29 +120,21 @@ func logSync(_ message: String) {
     print(line)
     fflush(stdout)
 
-    let breadcrumb = Breadcrumb(level: .info, category: "app")
-    breadcrumb.message = message
-    SentrySDK.addBreadcrumb(breadcrumb)
 
     appendToLogFileSync(line)
 }
 
-/// Write to log file, stdout, and Sentry breadcrumbs
+/// Write to log file and stdout
 func log(_ message: String) {
     let timestamp = dateFormatter.string(from: Date())
     let line = "[\(timestamp)] [app] \(message)"
     print(line)
     fflush(stdout)
 
-    // Add breadcrumb to Sentry for context in crash reports (now enabled for dev builds too)
-    let breadcrumb = Breadcrumb(level: .info, category: "app")
-    breadcrumb.message = message
-    SentrySDK.addBreadcrumb(breadcrumb)
-
     appendToLogFile(line)
 }
 
-/// Log an error and capture it in Sentry
+/// Log an error to the app log.
 func logError(_ message: String, error: Error? = nil) {
     let timestamp = dateFormatter.string(from: Date())
     let errorDesc = error?.localizedDescription ?? ""
@@ -151,24 +142,6 @@ func logError(_ message: String, error: Error? = nil) {
     let line = "[\(timestamp)] [error] \(fullMessage)"
     print(line)
     fflush(stdout)
-
-    // Add error breadcrumb and capture in Sentry (now enabled for dev builds too)
-    let breadcrumb = Breadcrumb(level: .error, category: "error")
-    breadcrumb.message = fullMessage
-    SentrySDK.addBreadcrumb(breadcrumb)
-
-    // Capture the error in Sentry (skip intentional cancellations — they're noise)
-    let isCancelledRequest = (error as? URLError)?.code == .cancelled ||
-        (error as NSError?)?.domain == NSURLErrorDomain && (error as NSError?)?.code == NSURLErrorCancelled
-    if let error = error, !isCancelledRequest {
-        SentrySDK.capture(error: error) { scope in
-            scope.setContext(value: ["message": message], key: "app_context")
-        }
-    } else if error == nil {
-        SentrySDK.capture(message: fullMessage) { scope in
-            scope.setLevel(.error)
-        }
-    }
 
     appendToLogFile(line)
 }

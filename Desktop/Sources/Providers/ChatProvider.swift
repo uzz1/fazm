@@ -2,7 +2,6 @@ import SwiftUI
 import Combine
 import GRDB
 import Observation
-import Sentry
 
 extension Notification.Name {
     /// Posted by ChatProvider when it dequeues and starts processing a pending message.
@@ -1123,13 +1122,6 @@ class ChatProvider: ObservableObject {
                         self?.claudeAuthFailedReason = reason
                         self?.claudeAuthRetryCooldownEnd = Date().addingTimeInterval(30)
                         AnalyticsManager.shared.claudeAuthFailed(reason: reason, httpStatus: httpStatus)
-                        let crumb = Breadcrumb(level: .error, category: "claude-oauth")
-                        crumb.message = "Claude OAuth rejected (HTTP \(httpStatus ?? 0)): \(reason.prefix(200))"
-                        crumb.data = [
-                            "http_status": httpStatus ?? 0,
-                            "reason": String(reason.prefix(500)),
-                        ]
-                        SentrySDK.addBreadcrumb(crumb)
                     }
                 }
             )
@@ -1674,13 +1666,6 @@ class ChatProvider: ObservableObject {
                         self?.claudeAuthFailedReason = reason
                         self?.claudeAuthRetryCooldownEnd = Date().addingTimeInterval(30)
                         AnalyticsManager.shared.claudeAuthFailed(reason: reason, httpStatus: httpStatus)
-                        let crumb = Breadcrumb(level: .error, category: "claude-oauth")
-                        crumb.message = "Claude OAuth rejected (HTTP \(httpStatus ?? 0)): \(reason.prefix(200))"
-                        crumb.data = [
-                            "http_status": httpStatus ?? 0,
-                            "reason": String(reason.prefix(500)),
-                        ]
-                        SentrySDK.addBreadcrumb(crumb)
                     }
                 }
             )
@@ -1919,10 +1904,6 @@ class ChatProvider: ObservableObject {
                         // dropdown stops showing "Connecting…" and the user can retry.
                         CodexBackendManager.shared.pendingPickerModelId = nil
                         AnalyticsManager.shared.codexLoginFailed(reason: error)
-                        let crumb = Breadcrumb(level: .error, category: "codex-oauth")
-                        crumb.message = "Codex OAuth failed: \(error.prefix(200))"
-                        crumb.data = ["error": String(error.prefix(500))]
-                        SentrySDK.addBreadcrumb(crumb)
                     }
                 }
             )
@@ -1996,16 +1977,6 @@ class ChatProvider: ObservableObject {
                             stderrTail: stderrTail
                         )
                         log("ChatProvider: bridge_warmup_FAILED stage=\(failureStage ?? "-") failed=\(failedSessions.joined(separator: ",")) error=\(error ?? "-")")
-                        let breadcrumb = Breadcrumb(level: .error, category: "bridge")
-                        breadcrumb.message = "bridge_warmup_failed (stage=\(failureStage ?? "unknown"), failed=[\(failedSessions.joined(separator: ","))])"
-                        breadcrumb.data = [
-                            "failure_stage": failureStage ?? "unknown",
-                            "failed_sessions": failedSessions.joined(separator: ","),
-                            "duration_ms": swiftMeasuredMs,
-                            "stderr_tail": String((stderrTail ?? "").suffix(4000)),
-                        ]
-                        SentrySDK.addBreadcrumb(breadcrumb)
-                        SentrySDK.capture(message: "ACP bridge warmup failed (stage=\(failureStage ?? "unknown"))")
                     }
                 }
             }
@@ -4260,9 +4231,6 @@ class ChatProvider: ObservableObject {
                 messageLength: trimmedText.count,
                 reason: "concurrent_send"
             )
-            let breadcrumb = Breadcrumb(level: .warning, category: "chat")
-            breadcrumb.message = "sendMessage dropped: session \(effectiveKey) already sending (\(trimmedText.prefix(50))...)"
-            SentrySDK.addBreadcrumb(breadcrumb)
             return
         }
         sendingSessionKeys.insert(effectiveKey)
@@ -5316,9 +5284,6 @@ class ChatProvider: ObservableObject {
                         .text(id: UUID().uuidString, text: messageText)
                     )
                     log("ChatProvider: stream_blocks_recovered — contentBlocks had no text but result.text=\(messageText.count) chars, synthesized fallback block (tools=\(toolNames.count))")
-                    let breadcrumb = Breadcrumb(level: .warning, category: "chat")
-                    breadcrumb.message = "stream_blocks_recovered (len=\(messageText.count), tools=\(toolNames.count), mode=\(bridgeMode))"
-                    SentrySDK.addBreadcrumb(breadcrumb)
                 }
 
                 completeRemainingToolCalls(messageId: aiMessageId)
@@ -5482,9 +5447,6 @@ class ChatProvider: ObservableObject {
             let responseLength = max(messageText.count, queryResult.text.count)
             if responseLength == 0 {
                 log("ChatProvider: WARNING — response_length=0 on successful query (outputTokens=\(queryResult.outputTokens), messageText.count=\(messageText.count), queryResult.text.count=\(queryResult.text.count))")
-                let breadcrumb = Breadcrumb(level: .warning, category: "chat")
-                breadcrumb.message = "response_length=0 on success (outputTokens=\(queryResult.outputTokens), mode=\(bridgeMode))"
-                SentrySDK.addBreadcrumb(breadcrumb)
             }
             // Classify the turn so an empty/dropped turn isn't counted as a
             // success in PostHog. This event fires on the success path even when
@@ -6187,9 +6149,6 @@ class ChatProvider: ObservableObject {
             let thinkingLen = buf?.thinkingBuffer.count ?? 0
             if textLen > 0 || thinkingLen > 0 {
                 log("ChatProvider: stream_buffer_dropped — id=\(id) textLen=\(textLen) thinkingLen=\(thinkingLen) (message no longer in array)")
-                let breadcrumb = Breadcrumb(level: .warning, category: "chat")
-                breadcrumb.message = "stream_buffer_dropped (textLen=\(textLen), thinkingLen=\(thinkingLen))"
-                SentrySDK.addBreadcrumb(breadcrumb)
             }
             streamingBuffers.removeValue(forKey: id)
             return
@@ -6330,11 +6289,8 @@ class ChatProvider: ObservableObject {
         guard let index = messages.firstIndex(where: { $0.id == messageId }) else {
             // Silent-drop: tool activity arrived for a message that's no longer
             // in the array. This is what causes the empty-bubble bug — 17 tool
-            // blocks vanish without a trace. Breadcrumb so it shows up in Sentry.
+            // blocks vanish without a trace. Logged so it is at least visible locally.
             log("ChatProvider: tool_activity_dropped — id=\(messageId) tool=\(toolName) status=\(status) (message no longer in array)")
-            let breadcrumb = Breadcrumb(level: .warning, category: "chat")
-            breadcrumb.message = "tool_activity_dropped (tool=\(toolName), status=\(status))"
-            SentrySDK.addBreadcrumb(breadcrumb)
             return
         }
 

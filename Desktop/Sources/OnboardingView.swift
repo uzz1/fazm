@@ -458,7 +458,7 @@ struct OnboardingPrivacySheet: View {
                                 .scaledFont(size: 13, weight: .semibold)
                                 .foregroundColor(FazmColors.textPrimary)
 
-                            Text("We do not sell, rent, or share your personal data with third parties. Analytics data is processed by PostHog (our analytics provider) and Sentry (error tracking). These services receive only anonymized event data, not your personal content.")
+                            Text("We do not sell, rent, or share your personal data with third parties.")
                                 .scaledFont(size: 11)
                                 .foregroundColor(FazmColors.textTertiary)
                                 .fixedSize(horizontal: false, vertical: true)

@@ -1,6 +1,6 @@
+import AppKit
 import Foundation
 import ServiceManagement
-import Sentry
 
 /// Manages the app's launch at login status using SMAppService (macOS 13+)
 @MainActor
@@ -52,10 +52,6 @@ class LaunchAtLoginManager: ObservableObject {
         } catch {
             let errorMsg = error.localizedDescription
             log("LaunchAtLogin: Failed to \(enabled ? "register" : "unregister"): \(errorMsg)")
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: enabled ? "register" : "unregister", key: "login_item_action")
-                scope.setTag(value: "\(SMAppService.mainApp.status)", key: "sma_status")
-            }
             lastError = errorMsg
             refreshStatus()
             return false

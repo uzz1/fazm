@@ -1,53 +1,5 @@
 import SwiftUI
-import Sentry
 import FirebaseCore
-
-// MARK: - Sentry Noise Guard
-/// Suppresses runaway-loop Sentry events (e.g. GRDB on a corrupted DB firing thousands of
-/// identical errors per session). Allows the first N captures per fingerprint per process,
-/// then drops the rest. Resets on relaunch — a real recurring issue still surfaces daily.
-enum SentryNoiseGuard {
-    private static let lock = NSLock()
-    private static var counts: [String: Int] = [:]
-    private static let maxPerFingerprint = 3
-
-    /// Returns a fingerprint for events known to fire in tight loops. nil = not gated.
-    static func fingerprint(for event: Event, message: String) -> String? {
-        if let exceptions = event.exceptions {
-            for exc in exceptions {
-                if exc.type.hasPrefix("GRDB.DatabaseError") {
-                    if exc.value.contains("SQLite error 11") { return "grdb-malformed" }
-                    if exc.value.contains("SQLite error 10") { return "grdb-disk-io" }
-                    if exc.value.contains("SQLite error 19") { return "grdb-constraint" }
-                    return "grdb-other"
-                }
-                // App Hang (ANR) events fire constantly on a busy main thread (LLM
-                // streaming, heavy SwiftUI layout). Cap per stack site per process so
-                // each distinct hang location still surfaces a few samples a day without
-                // any single user dumping dozens of identical 2s-hang events into quota.
-                if exc.type == "App Hanging" {
-                    let frames = exc.stacktrace?.frames
-                    let site = frames?.last(where: { $0.inApp?.boolValue == true })?.function
-                        ?? frames?.last?.function
-                        ?? "unknown"
-                    return "app-hang-\(site)"
-                }
-            }
-        }
-        if message.contains("consecutive I/O errors") { return "rewind-io-loop" }
-        // ResourceMonitor's critical-memory alert is already cooldown-gated, but a
-        // long-lived process can still emit many; cap per process as a backstop.
-        if message.hasPrefix("Critical Memory Usage") { return "critical-memory" }
-        return nil
-    }
-
-    static func shouldCapture(fingerprint: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        let n = (counts[fingerprint] ?? 0) + 1
-        counts[fingerprint] = n
-        return n <= maxPerFingerprint
-    }
-}
 
 // MARK: - Launch Mode
 /// Determines which UI to show based on command-line arguments
@@ -181,7 +133,6 @@ struct FazmApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private var sentryHeartbeatTimer: Timer?
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
     private var windowObservers: [NSObjectProtocol] = []
@@ -205,7 +156,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Without this, writing to a dead FFmpeg stdin or agent-bridge pipe kills the process.
         signal(SIGPIPE, SIG_IGN)
 
-        // Log uncaught NSExceptions to fazm.log + Sentry. The .ips report omits the reason
+        // Log uncaught NSExceptions to fazm.log. The .ips report omits the reason
         // string, so when AppKit throws (e.g. _postWindowNeedsUpdateConstraints during a
         // SwiftUI representable update on a torn-down window) we previously had no signal.
         // 2026-05-21 prod crash repro: 5+ streaming popouts + context compaction.
@@ -214,7 +165,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let reason = exception.reason ?? "<nil>"
             let stack = exception.callStackSymbols.joined(separator: "\n")
             log("FATAL NSException [\(name)]: \(reason)\n\(stack)")
-            SentrySDK.capture(exception: exception)
         }
 
         // Seed UserDefaults defaults for keys whose SwiftUI `@AppStorage` default is `true`.
@@ -301,87 +251,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Without this, users who had the old square icon see it cached indefinitely
         // in the Dock and notifications.
         resetIconCacheIfNeeded()
-
-        // Initialize Sentry for crash reporting and error tracking (including dev builds)
-        let isDev = AnalyticsManager.isDevBuild
-        SentrySDK.start { options in
-            options.dsn = "https://47b23bc65deb3c58b0c7314e7b648110@o4507617161314304.ingest.us.sentry.io/4510989741326336"
-            options.debug = false
-            options.enableAutoSessionTracking = true
-            options.environment = isDev ? "development" : "production"
-            // Disable automatic HTTP client error capture — the SDK creates noisy events
-            // for every 4xx/5xx response (e.g. Cloud Run 503 cold starts on /v1/crisp/unread).
-            // App code already handles HTTP errors and reports meaningful ones explicitly.
-            options.enableCaptureFailedRequests = false
-            options.maxBreadcrumbs = 1000
-            // Filter noisy breadcrumbs that fill up the buffer with useless data
-            options.beforeBreadcrumb = { breadcrumb in
-                let msg = breadcrumb.message ?? ""
-                // ResourceMonitor fires every 30s — 86% of all breadcrumbs
-                if msg.contains("ResourceMonitor:") { return nil }
-                // PostHog/Sentry heartbeats every 60s
-                if msg.contains("session_heartbeat") || msg.contains("Session Heartbeat") { return nil }
-                // Session recording flag checks every 5min
-                if msg.contains("session-recording-enabled") { return nil }
-                // Empty HTTP breadcrumbs (auto-captured, no useful info)
-                if breadcrumb.category == "http" && msg.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
-                return breadcrumb
-            }
-            options.beforeSend = { event in
-                // Allow user feedback through from all builds (dev + prod)
-                if event.message?.formatted.hasPrefix("User Report") == true { return event }
-                // Never send other events from dev builds — they pollute production Sentry data
-                if isDev { return nil }
-                // Filter out HTTP errors targeting the dev tunnel — noise when the tunnel is down
-                if let urlTag = event.tags?["url"], urlTag.contains("m13v.com") {
-                    return nil
-                }
-                // Filter out transient NSURLError conditions — these reflect the user's
-                // network state (offline, timeout, dropped connection) or intentional
-                // cancellations, not bugs in the app. They previously flooded quota:
-                //   -999  cancelled (e.g. proactive assistants cancelling in-flight requests)
-                //   -1001 request timed out
-                //   -1003 cannot find host
-                //   -1004 cannot connect to host
-                //   -1005 network connection lost
-                //   -1009 not connected to the internet (offline)
-                //   -1020 data not allowed
-                if let exceptions = event.exceptions {
-                    let transientURLCodes = ["-999", "-1001", "-1003", "-1004", "-1005", "-1009", "-1020"]
-                    let isTransientURLError = exceptions.contains { exc in
-                        guard exc.type == "NSURLErrorDomain" else { return false }
-                        return transientURLCodes.contains { code in
-                            exc.value.contains("Code=\(code)") || exc.value.contains("Code: \(code)")
-                        }
-                    }
-                    if isTransientURLError { return nil }
-                }
-                // Filter out AuthError.notSignedIn — this is thrown when token refresh transiently
-                // fails (network blip, expired token mid-refresh). The user is still signed in per
-                // UserDefaults; the 30s refresh timer will retry. Not actionable as a Sentry error.
-                if let exceptions = event.exceptions, exceptions.contains(where: { exc in
-                    exc.type == "Fazm.AuthError" && exc.value.contains("notSignedIn")
-                }) {
-                    return nil
-                }
-                let msg = event.message?.formatted ?? ""
-                // AuthService token-refresh retry loop fires every ~12s for users with bad refresh
-                // tokens — 5 users generated 104k events in 14 days (95% of all error volume).
-                // The permanent-failure branch already signs out and is captured separately.
-                if msg.contains("AuthService: Token refresh failed") { return nil }
-                // Session Heartbeat is a breadcrumb category, not an error condition.
-                if msg.hasPrefix("Session Heartbeat") { return nil }
-                // GRDB SQLite corruption / I/O errors retry forever from inside the DB layer.
-                // Capture once per process per fingerprint so we still see the issue without
-                // burning the entire error quota on one user's broken disk.
-                let fp = SentryNoiseGuard.fingerprint(for: event, message: msg)
-                if let fp = fp, !SentryNoiseGuard.shouldCapture(fingerprint: fp) {
-                    return nil
-                }
-                return event
-            }
-        }
-        log("Sentry initialized (environment: \(isDev ? "development" : "production"))")
 
         // Log code signature and install origin for KERN_CODESIGN_ERROR debugging
         logCodeSignatureStatus()
@@ -575,9 +444,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Start Sentry heartbeat timer (every 5 minutes) to capture breadcrumbs periodically
-        startSentryHeartbeat()
-
         // Start PostHog session heartbeat (every 60s) for session duration tracking
         AnalyticsManager.shared.startSessionHeartbeat()
 
@@ -618,20 +484,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // If we just rolled back from a bad update, show a notification and track analytics.
 
         log("AppDelegate: applicationDidFinishLaunching completed")
-    }
-
-    /// Start a timer that sends Sentry session snapshots every 5 minutes
-    /// This ensures we have breadcrumbs captured even without errors
-    private func startSentryHeartbeat() {
-        // Now runs in dev builds too since Sentry is always initialized.
-        // Only add breadcrumbs (no event) — sending events every 5 min wastes Sentry quota
-        // and drowns out real issues (was 3500+ events/week).
-        sentryHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
-            let crumb = Breadcrumb(level: .info, category: "heartbeat")
-            crumb.message = "Session Heartbeat"
-            SentrySDK.addBreadcrumb(crumb)
-            log("Sentry: Session heartbeat captured")
-        }
     }
 
 
@@ -856,10 +708,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         guard let statusBarItem = statusBarItem else {
             log("AppDelegate: [MENUBAR] ERROR - Failed to create status bar item")
-            SentrySDK.capture(message: "Failed to create NSStatusItem") { scope in
-                scope.setLevel(.error)
-                scope.setTag(value: "menu_bar", key: "component")
-            }
             return
         }
 
@@ -1208,8 +1056,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         PushToTalkManager.shared.cleanup()
 
         // Stop heartbeat timer
-        sentryHeartbeatTimer?.invalidate()
-        sentryHeartbeatTimer = nil
 
         // Stop the routine scheduler (in-flight cron-runner subprocesses keep their own
         // timeout and finish independently of the app).
@@ -1223,10 +1069,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ResourceMonitor.shared.stop()
 
         // Capture final session snapshot before termination (now enabled for dev builds too)
-        SentrySDK.capture(message: "App Terminating") { scope in
-            scope.setLevel(.info)
-            scope.setTag(value: "lifecycle", key: "event_type")
-        }
     }
 
     @objc func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
@@ -1487,15 +1329,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let prevStr = previousVersion.map { "\($0)+\(previousBuild ?? "?")" } ?? "none"
             log("CodeSign: verify=\(verifyOK ? "OK" : "FAILED") pageSize=\(pageSize) version=\(currentVersion)+\(currentBuild) prevVersion=\(prevStr) install=\(installMethod) quarantine=\(quarantineValue) appMod=\(appModDate) binMod=\(binModDate)\(imageList.isEmpty ? "" : " images=[\(imageList.trimmingCharacters(in: .whitespaces))]")\(verifyOK ? "" : " error=\(verifyOutput)")")
 
-            // Set Sentry tags so we can filter crashes by install method and codesign status
-            SentrySDK.configureScope { scope in
-                scope.setTag(value: installMethod, key: "install_method")
-                scope.setTag(value: verifyOK ? "valid" : "invalid", key: "codesign_status")
-                scope.setTag(value: pageSize, key: "codesign_page_size")
-                if isVersionChange {
-                    scope.setTag(value: prevStr, key: "previous_version")
-                }
-            }
+            // Record install method and codesign status in the app log
 
             // Report codesign failures to PostHog for tracking across all users
             if !verifyOK {

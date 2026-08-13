@@ -1,6 +1,5 @@
 import Foundation
 import AppKit
-import Sentry
 
 /// Unified analytics manager that sends events to PostHog
 @MainActor
@@ -38,9 +37,6 @@ class AnalyticsManager {
         let channel = UserDefaults.standard.string(forKey: "update_channel") ?? "beta"
         PostHogManager.shared.register(properties: ["update_channel": channel])
         PostHogManager.shared.setUserProperty(key: "update_channel", value: channel)
-        SentrySDK.configureScope { scope in
-            scope.setTag(value: channel, key: "update_channel")
-        }
     }
 
     // MARK: - User Identification
@@ -976,9 +972,6 @@ class AnalyticsManager {
         PostHogManager.shared.setUserProperty(key: "update_channel", value: channel)
         PostHogManager.shared.track("Update Channel Changed", properties: ["channel": channel])
         // Update Sentry tag
-        SentrySDK.configureScope { scope in
-            scope.setTag(value: channel, key: "update_channel")
-        }
     }
 
     // MARK: - Notification Events

@@ -774,7 +774,7 @@ class FloatingControlBarWindow: NSWindow, NSWindowDelegate {
         // from `_updateStructuralRegionsOnNextDisplayCycle` during the CA transaction commit
         // (NSTextView frame change → tracking-area invalidation → window structural-region
         // update). The exception is intercepted by NSApplicationCrashOnExceptions (enabled by
-        // SentrySDK) before any Swift @try/@catch can unwind, so we cannot recover from it.
+        // the crash reporter) before any Swift @try/@catch can unwind, so we cannot recover from it.
         // The mitigation is at the call site: callers passing `animated:true` should not be
         // stacking resizes during a streaming response. See `resizeToResponseHeightPublic`
         // and its callers.
@@ -855,7 +855,7 @@ class FloatingControlBarWindow: NSWindow, NSWindowDelegate {
         // animate:false — on macOS 26 (Tahoe) an animated setFrame can re-enter the
         // window constraint cycle (NSTextView frame change → setNeedsUpdateConstraints →
         // _postWindowNeedsUpdateConstraints), throwing an uncaught NSException that
-        // SentrySDK's NSApplicationCrashOnExceptions turns into an abort(). Pressing
+        // NSApplicationCrashOnExceptions turns into an abort(). Pressing
         // push-to-talk would freeze ~1-2s then crash. resizeForHover already uses
         // animate:false for the same reason; keep PTT consistent.
         resizeAnchored(to: size, makeResizable: false, animated: false)
