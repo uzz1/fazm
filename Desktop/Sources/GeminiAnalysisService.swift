@@ -1,7 +1,6 @@
 import Foundation
 import GRDB
 import PostHog
-import SessionReplay
 
 /// Accumulates session recording chunks and periodically sends them to the Gemini API
 /// for multimodal video analysis to identify tasks an AI agent could help with.
@@ -150,7 +149,7 @@ actor GeminiAnalysisService {
         let totalTokens: Int
     }
 
-    /// Chunk info passed from SessionRecordingManager when a chunk is finalized.
+    /// Chunk info for a finalized screen-capture chunk.
     struct ChunkInfo: Sendable {
         let localURL: URL
         let chunkIndex: Int
@@ -188,7 +187,7 @@ actor GeminiAnalysisService {
         }
     }
 
-    /// Called by SessionRecordingManager when a chunk is finalized.
+    /// Called when a chunk is finalized.
     /// Moves the file to a stable location and persists the buffer index.
     func handleChunk(_ info: ChunkInfo) {
         // Check if screen observer is disabled in settings

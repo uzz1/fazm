@@ -129,10 +129,7 @@ struct OnboardingView: View {
                         }
                     }
                     .sheet(isPresented: $showPrivacySheet) {
-                        OnboardingPrivacySheet(
-                            isPresented: $showPrivacySheet,
-                            showSessionRecordingSection: PostHogManager.shared.isFeatureEnabled("session-recording-enabled")
-                        )
+                        OnboardingPrivacySheet(isPresented: $showPrivacySheet)
                     }
                 }
         // Floating "Stuck? Chat with us" escape hatch — bottom-trailing over
@@ -354,7 +351,6 @@ struct AnimatedGIFView: NSViewRepresentable {
 
 struct OnboardingPrivacySheet: View {
     @Binding var isPresented: Bool
-    var showSessionRecordingSection: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -454,49 +450,6 @@ struct OnboardingPrivacySheet: View {
                             }
                         }
                     }
-
-                    // 4. Beta Program — Extended Analytics (only shown to enrolled users)
-                    if showSessionRecordingSection {
-                    privacyCard {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 8) {
-                                Label("Beta Program", systemImage: "testtube.2")
-                                    .scaledFont(size: 13, weight: .semibold)
-                                    .foregroundColor(FazmColors.textPrimary)
-
-                                Text("Beta")
-                                    .scaledFont(size: 10, weight: .semibold)
-                                    .foregroundColor(FazmColors.purplePrimary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(FazmColors.purplePrimary.opacity(0.15))
-                                    .cornerRadius(4)
-                            }
-
-                            Text("As a beta user, you agree that we may collect extended analytics to help us build the best possible experience. This includes:")
-                                .scaledFont(size: 11)
-                                .foregroundColor(FazmColors.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                sheetTrackingItem("Session recordings of app usage (screen capture)")
-                                sheetTrackingItem("Detailed interaction patterns and navigation flows")
-                                sheetTrackingItem("Performance metrics and resource usage")
-                                sheetTrackingItem("Feature adoption and workflow analytics")
-                            }
-
-                            Text("Session recordings are encrypted, stored securely on Google Cloud, and automatically deleted after 30 days. They are only used internally by the Fazm team to identify UX issues and improve the product. Recordings are never shared with third parties.")
-                                .scaledFont(size: 11)
-                                .foregroundColor(FazmColors.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Text("You may opt out of the beta channel at any time in Settings, which will stop extended data collection.")
-                                .scaledFont(size: 11, weight: .medium)
-                                .foregroundColor(FazmColors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    } // end if showSessionRecordingSection
 
                     // 5. Data Sharing
                     privacyCard {

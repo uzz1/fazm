@@ -445,39 +445,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Calling it here ensures email/firebase_uid are linked to the device UUID.
         AuthService.shared.setPostHogUserContext()
 
-        // Reclaim disk from stale recordings left by prior launches (failed uploads,
-        // empty shells from --version probes / run.sh rebuilds, observer originals
-        // from before the moveItem fix). Runs async on a background queue, so it
-        // does not block startup. Skips dirs touched in the last 5 minutes to avoid
-        // the active recorder's session.
-        SessionRecordingManager.cleanupStaleRecordings()
-
-        // EXPERIMENT 2026-05-28: disable session recording + screen observer.
-        // Sample of prod 2.9.47 showed thread-0/5/10 all near 100% CPU and the
-        // ACPBridge being OOM-killed; the dominant Fazm symbols across threads
-        // were `SessionRecorder.captureFrame` / `ScreenCaptureService.captureActiveWindow`
-        // / `VideoChunkEncoder.writeFrame`. Memory file
-        // `bug_fazm_screen_observer_tcc_dialog.md` flags the always-on
-        // observer as unfixed: it runs unconditionally and burns 7×/sec
-        // SCShareableContent calls. Disabling both calls as the experiment
-        // to confirm this is the root cause of the chat-window lag.
-        // If responsive, restore behind a UserDefaults opt-in gate.
-        if UserDefaults.standard.bool(forKey: "fazm_enable_session_recording_2028") {
-            SessionRecordingManager.shared.startIfEnabled()
-            SessionRecordingManager.shared.startScreenObserver()
-        } else {
-            log("SessionRecording: DISABLED at startup (experiment; set UserDefault 'fazm_enable_session_recording_2028' to re-enable)")
-        }
-
-        // Test trigger: show session recording permission prompt.
-        // Legacy: xcrun swift -e 'import Foundation; DistributedNotificationCenter.default().postNotificationName(.init("com.fazm.testSessionRecordingPermission"), object: nil, userInfo: nil, deliverImmediately: true); RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.0))'
-        // Bundle-scoped: replace `com.fazm.testSessionRecordingPermission` with `com.fazm.desktop-dev.testSessionRecordingPermission` (dev) or `com.fazm.app.testSessionRecordingPermission` (prod).
-        DistributedNotificationCenter.default().addFazmObserver(
-            "testSessionRecordingPermission"
-        ) { _ in
-            SessionRecordingPermissionWindowController.shared.showForTesting()
-        }
-
         // Test trigger: re-enter onboarding without signing out or resetting permissions.
         // Lightweight reset — keeps sign-in + permissions, just flips hasCompletedOnboarding
         // and clears persisted onboarding chat state so the user sees OnboardingView again.
@@ -1232,9 +1199,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Stop ACP bridge and all child processes (MCP servers) to prevent orphans
         FloatingControlBarManager.shared.chatProvider?.stopBridge()
-
-        // Stop session recording
-        SessionRecordingManager.shared.shutdown()
 
         // Stop session heartbeat and record final session duration
         AnalyticsManager.shared.stopSessionHeartbeat()

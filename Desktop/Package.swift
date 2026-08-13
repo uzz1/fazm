@@ -13,7 +13,6 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
         .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "11.0.0"),
-        .package(url: "https://github.com/m13v/macos-session-replay.git", from: "0.7.0"),
         .package(path: "LocalPackages/Highlightr"),
     ],
     targets: [
@@ -33,7 +32,6 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
-                .product(name: "SessionReplay", package: "macos-session-replay"),
                 .product(name: "Highlightr", package: "Highlightr"),
             ],
             path: "Sources",

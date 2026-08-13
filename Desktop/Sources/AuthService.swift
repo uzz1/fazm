@@ -973,9 +973,6 @@ class AuthService: NSObject {
         // Fetch API keys from backend now that user is authenticated
         Task { await KeyService.shared.fetchKeys() }
 
-        // Re-check session recording flag now that distinct_id is the Firebase UID
-        SessionRecordingManager.shared.recheckAfterSignIn()
-
         log("AuthService: Firebase auth successful (provider: \(provider), userId: \(localId), email: \(userEmail ?? "nil"))")
     }
 
