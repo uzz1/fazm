@@ -96,6 +96,11 @@ trap '_fazm_status_on_exit; fazm_release_lock' EXIT
 step "Cleaning up conflicting app bundles..."
 # Clean old build names from local build dir
 rm -rf "$BUILD_DIR/Omi Computer.app" "$BUILD_DIR/Omi Dev.app" 2>/dev/null
+# Sparkle is gone. The app bundle is reused across builds and is never wiped, so
+# a Sparkle.framework left by a pre-removal build would otherwise survive here,
+# get signed, and ship. Its old delete lived inside the copy step that was
+# removed with the dependency, so it needs an explicit line of its own.
+rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework" 2>/dev/null
 CONFLICTING_APPS=(
     "/Applications/Omi Computer.app"
     "/Applications/Omi.app"
