@@ -43,6 +43,65 @@ enum DeskPilotUILease {
   private static let queue = DispatchQueue(label: "com.fazm.deskpilot.ui-lease")
   private static var timer: DispatchSourceTimer?
 
+  /// The live lease token and the moment it stops being usable.
+  ///
+  /// Retained because the approval path needs it: `approval.list` and
+  /// `approval.resolve` are lease-gated, and they are called in response to a
+  /// human clicking, not on the publish timer. Guarded by `leaseLock` rather
+  /// than `queue` so a caller on any thread can read it without deadlocking
+  /// against a publish cycle in flight.
+  private static let leaseLock = NSLock()
+  private static var currentLease: (token: String, expires: Date)?
+
+  /// The current lease token, or nil if there is none or it has lapsed.
+  ///
+  /// Nil is a denial, never a prompt to proceed without one: every caller of
+  /// this is about to ask the parent for something only a verified UI may ask.
+  /// The expiry is checked with a margin so a token cannot be presented in the
+  /// instant it stops being valid.
+  static func lease(now: Date = Date()) -> String? {
+    leaseLock.lock()
+    defer { leaseLock.unlock() }
+    guard let held = currentLease, held.expires > now.addingTimeInterval(1) else { return nil }
+    return held.token
+  }
+
+  private static func store(lease: String, expires: Date) {
+    leaseLock.lock()
+    currentLease = (lease, expires)
+    leaseLock.unlock()
+  }
+
+  private static func forgetLease() {
+    leaseLock.lock()
+    currentLease = nil
+    leaseLock.unlock()
+  }
+
+  /// Parse an RFC3339 UTC timestamp in one of the two shapes the parent emits.
+  ///
+  /// `PolicyServer.timestamp` is `datetime.isoformat()` with the offset
+  /// rewritten to `Z`, so it carries fractional seconds whenever the microsecond
+  /// field is non-zero — which is nearly always. It is dropped only on an exact
+  /// second. Both forms must parse; accepting only the fraction-free one
+  /// silently rejected every real grant and the lease was never published.
+  ///
+  /// Still deliberately not `ISO8601DateFormatter` with lenient options: these
+  /// timestamps gate an authorization, so an offset, a space separator, or a
+  /// missing `Z` should fail rather than be guessed at. Note this is the
+  /// *reader*; `rfc3339` below is the writer and must stay fraction-free,
+  /// because Hermes' own validator accepts only that shape.
+  static func parseRFC3339(_ value: String) -> Date? {
+    for format in ["yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'"] {
+      let formatter = DateFormatter()
+      formatter.locale = Locale(identifier: "en_US_POSIX")
+      formatter.timeZone = TimeZone(secondsFromGMT: 0)
+      formatter.dateFormat = format
+      if let parsed = formatter.date(from: value) { return parsed }
+    }
+    return nil
+  }
+
   // MARK: - Paths
 
   static var runDirectory: URL {
@@ -85,6 +144,10 @@ enum DeskPilotUILease {
 
   /// Registers with the policy server and rewrites the lease file.
   /// Returns the published lease token, or nil with the reason on stderr.
+  ///
+  /// A failed registration forgets the retained token before returning. Holding
+  /// a token whose grant we could not renew would let the approval path present
+  /// credentials it can no longer show are live.
   @discardableResult
   static func publishOnce() -> String? {
     do {
@@ -96,25 +159,29 @@ enum DeskPilotUILease {
 
     guard let identifier = Bundle.main.bundleIdentifier, !identifier.isEmpty else {
       fputs("[deskpilot] ui-lease: bundle has no identifier\n", stderr)
+      forgetLease()
       return nil
     }
 
-    let token: String
+    let grant: (token: String, expires: Date)
     do {
-      token = try register(bundleIdentifier: identifier)
+      grant = try register(bundleIdentifier: identifier)
     } catch {
       // Expected while the policy server is not yet listening; the timer retries.
       fputs("[deskpilot] ui-lease: registration failed: \(error)\n", stderr)
+      forgetLease()
       return nil
     }
 
     do {
-      try write(lease: token, expiresAt: Date().addingTimeInterval(publishWindow))
+      try write(lease: grant.token, expiresAt: Date().addingTimeInterval(publishWindow))
     } catch {
       fputs("[deskpilot] ui-lease: publish failed: \(error)\n", stderr)
+      forgetLease()
       return nil
     }
-    return token
+    store(lease: grant.token, expires: grant.expires)
+    return grant.token
   }
 
   // MARK: - Errors
@@ -167,97 +234,23 @@ enum DeskPilotUILease {
   // MARK: - Registration
 
   /// One `ui.register` round trip over the parent-owned Unix socket.
-  static func register(bundleIdentifier: String) throws -> String {
-    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { throw LeaseError.socket("socket() \(errno)") }
-    defer { close(descriptor) }
-
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    let path = socketURL.path
-    let capacity = MemoryLayout.size(ofValue: address.sun_path)
-    guard path.utf8.count < capacity else { throw LeaseError.socket("socket path too long") }
-    withUnsafeMutablePointer(to: &address.sun_path) { raw in
-      raw.withMemoryRebound(to: CChar.self, capacity: capacity) { destination in
-        _ = strlcpy(destination, path, capacity)
-      }
-    }
-
-    var timeout = timeval(
-      tv_sec: Int(socketTimeout),
-      tv_usec: Int32((socketTimeout - floor(socketTimeout)) * 1_000_000))
-    setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-    setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-        Darwin.connect(descriptor, generic, socklen_t(MemoryLayout<sockaddr_un>.size))
-      }
-    }
-    guard connected == 0 else { throw LeaseError.socket("connect() \(errno) at \(path)") }
-
+  ///
+  /// Framing lives in `DeskPilotPolicySocket` so registration and the approval
+  /// calls cannot drift apart. Returns the token and the parent's own grant
+  /// expiry — not the shorter window we publish to the file, which exists only
+  /// to keep the reader's 300-second bound off its boundary.
+  static func register(bundleIdentifier: String) throws -> (token: String, expires: Date) {
     // The claimed PID must equal the socket peer's PID, and that PID's
     // executable signature is what the parent actually verifies.
-    let request: [String: Any] = [
-      "protocol": "deskpilot.policy",
-      "version": 1,
-      "requestID": UUID().uuidString.lowercased(),
-      "method": "ui.register",
-      "params": ["bundleID": bundleIdentifier, "pid": Int(getpid())],
-    ]
-    var frame = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-    frame.append(0x0A)
-    try writeAll(descriptor, frame)
-
-    let line = try readLine(descriptor)
+    let result = try DeskPilotPolicySocket.call(
+      method: "ui.register",
+      params: ["bundleID": bundleIdentifier, "pid": Int(getpid())])
     guard
-      let decoded = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+      let token = result["uiLease"] as? String, !token.isEmpty,
+      let expiresRaw = result["expiresAt"] as? String,
+      let expires = parseRFC3339(expiresRaw)
     else { throw LeaseError.malformedResponse }
-    if let error = decoded["error"] as? [String: Any] {
-      throw LeaseError.refused(
-        rule: error["ruleID"] as? String ?? "unknown",
-        reason: error["reason"] as? String ?? "")
-    }
-    guard
-      let result = decoded["result"] as? [String: Any],
-      let token = result["uiLease"] as? String, !token.isEmpty
-    else { throw LeaseError.malformedResponse }
-    return token
-  }
-
-  private static func writeAll(_ descriptor: Int32, _ data: Data) throws {
-    var sent = 0
-    try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
-      guard let base = buffer.baseAddress else { return }
-      while sent < buffer.count {
-        let written = Darwin.write(descriptor, base.advanced(by: sent), buffer.count - sent)
-        if written <= 0 {
-          if errno == EINTR { continue }
-          throw LeaseError.socket("write() \(errno)")
-        }
-        sent += written
-      }
-    }
-  }
-
-  /// Reads one newline-delimited frame. The parent replies with exactly one
-  /// line and then closes, so a short read is not a frame boundary.
-  private static func readLine(_ descriptor: Int32) throws -> Data {
-    var accumulated = Data()
-    var chunk = [UInt8](repeating: 0, count: 4096)
-    while accumulated.count <= 262_144 {
-      let count = chunk.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-      if count < 0 {
-        if errno == EINTR { continue }
-        throw LeaseError.socket("read() \(errno)")
-      }
-      if count == 0 { break }
-      accumulated.append(contentsOf: chunk[0..<count])
-      if let terminator = accumulated.firstIndex(of: 0x0A) {
-        return accumulated[accumulated.startIndex..<terminator]
-      }
-    }
-    throw LeaseError.malformedResponse
+    return (token, expires)
   }
 
   // MARK: - Publication

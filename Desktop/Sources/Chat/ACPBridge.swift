@@ -274,6 +274,16 @@ actor ACPBridge {
     /// entitlement for (e.g. `[1m]` 1M-context requires the paid Claude add-on).
     /// Triggers a sticky-hide of those variants in `ShortcutSettings`.
     case modelEntitlementMissing(model: String, downgradedTo: String, reason: String)
+    /// DeskPilot: a privileged action is waiting on the human. Carries
+    /// correlation and expiry only — no model-authored text — because the
+    /// approval UI reads what the action *is* from the parent policy server's
+    /// action registry, not from the turn that requested it.
+    case deskpilotPermissionRequest(
+      routeID: String, sessionID: String, permissionRequestID: String,
+      pendingApprovalID: String, expiresAt: String)
+    /// DeskPilot: a pending request is gone (expired, cancelled, transport
+    /// lost) and must stop being offered.
+    case deskpilotPermissionClosed(permissionRequestID: String, reason: String)
   }
 
   // MARK: - Configuration
@@ -1174,6 +1184,12 @@ actor ACPBridge {
       }
 
       switch message {
+      // DeskPilot approval is handled in deliverMessage, which returns before
+      // reaching this legacy per-session handler; these cases exist so adding
+      // a message type stays a compile error rather than a silent drop.
+      case .deskpilotPermissionRequest, .deskpilotPermissionClosed:
+        break
+
       case .`init`:
         log("ACPBridge: new session started")
 
@@ -1530,6 +1546,34 @@ actor ACPBridge {
     sendLine("{\"type\":\"codex_logout\"}")
   }
 
+  /// Send the ACP half of a DeskPilot approval decision.
+  ///
+  /// This is only ever called by `DeskPilotApprovalCoordinator`, and only after
+  /// it has already resolved the parent policy socket. On its own it approves
+  /// nothing: Hermes waits for the parent's `approval.resolved` event too, and
+  /// denies unless both agree on all four correlation IDs.
+  func sendDeskPilotPermissionResponse(
+    routeID: String, sessionID: String, permissionRequestID: String,
+    pendingApprovalID: String, approved: Bool
+  ) {
+    let payload: [String: Any] = [
+      "type": "deskpilot_permission_response",
+      "routeID": routeID,
+      "sessionID": sessionID,
+      "permissionRequestID": permissionRequestID,
+      "pendingApprovalID": pendingApprovalID,
+      "decision": approved ? "allow_once" : "deny",
+    ]
+    guard
+      let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+      let line = String(data: data, encoding: .utf8)
+    else {
+      logError("ACPBridge: could not encode deskpilot permission response")
+      return
+    }
+    sendLine(line)
+  }
+
   // MARK: - Private
 
   private func sendLine(_ line: String) {
@@ -1596,6 +1640,30 @@ actor ACPBridge {
     case "init":
       let sessionId = dict["sessionId"] as? String ?? ""
       return .`init`(sessionId: sessionId)
+
+    case "deskpilot_permission_request":
+      // Every field is required. A partially-readable permission request is
+      // one we cannot correlate, and an uncorrelated request can never be
+      // matched to a parent approval — so it is dropped, which denies it.
+      guard
+        let routeID = dict["routeID"] as? String, !routeID.isEmpty,
+        let sessionID = dict["sessionID"] as? String, !sessionID.isEmpty,
+        let permissionRequestID = dict["permissionRequestID"] as? String, !permissionRequestID.isEmpty,
+        let pendingApprovalID = dict["pendingApprovalID"] as? String, !pendingApprovalID.isEmpty,
+        let expiresAt = dict["expiresAt"] as? String, !expiresAt.isEmpty
+      else {
+        logError("ACPBridge: dropping malformed deskpilot_permission_request")
+        return nil
+      }
+      return .deskpilotPermissionRequest(
+        routeID: routeID, sessionID: sessionID, permissionRequestID: permissionRequestID,
+        pendingApprovalID: pendingApprovalID, expiresAt: expiresAt)
+
+    case "deskpilot_permission_closed":
+      guard let permissionRequestID = dict["permissionRequestID"] as? String, !permissionRequestID.isEmpty
+      else { return nil }
+      return .deskpilotPermissionClosed(
+        permissionRequestID: permissionRequestID, reason: dict["reason"] as? String ?? "closed")
 
     case "text_delta":
       let text = dict["text"] as? String ?? ""
@@ -1858,6 +1926,54 @@ actor ACPBridge {
     // Maintain sessionId → sessionKey reverse map from session lifecycle events.
     // This is the source of truth for the routing fallback below — without it
     // we cannot recover when an inbound message arrives without a sessionKey.
+    // DeskPilot approval is handled here and returns: it is not a chat event,
+    // it belongs to no conversation, and it must not be routed by sessionKey —
+    // a consent prompt that got dropped because its window had closed would be
+    // a silently stranded turn.
+    switch message {
+    case .deskpilotPermissionRequest(
+      let routeID, let sessionID, let permissionRequestID, let pendingApprovalID, let expiresAt):
+      guard let expiry = DeskPilotUILease.parseRFC3339(expiresAt) else {
+        // An unreadable expiry cannot be honoured, and an approval whose
+        // deadline we cannot check is not one we can safely offer.
+        logError("ACPBridge: deskpilot permission \(permissionRequestID) has an unreadable expiry")
+        sendDeskPilotPermissionResponse(
+          routeID: routeID, sessionID: sessionID, permissionRequestID: permissionRequestID,
+          pendingApprovalID: pendingApprovalID, approved: false)
+        return
+      }
+      let request = DeskPilotApprovalCoordinator.Request(
+        routeID: routeID, sessionID: sessionID, permissionRequestID: permissionRequestID,
+        pendingApprovalID: pendingApprovalID, expiresAt: expiry)
+      // The coordinator lives on the main actor (it runs a modal dialog); the
+      // reply has to come back here, on this actor. Weak, so a torn-down
+      // bridge simply stops being able to answer rather than keeping itself
+      // alive to answer for a session that no longer exists.
+      let bridge = self
+      Task { @MainActor [weak bridge] in
+        DeskPilotApprovalCoordinator.shared.respond = { answered, approved in
+          Task { [weak bridge] in
+            await bridge?.sendDeskPilotPermissionResponse(
+              routeID: answered.routeID, sessionID: answered.sessionID,
+              permissionRequestID: answered.permissionRequestID,
+              pendingApprovalID: answered.pendingApprovalID, approved: approved)
+          }
+        }
+        DeskPilotApprovalCoordinator.shared.handle(request)
+      }
+      return
+
+    case .deskpilotPermissionClosed(let permissionRequestID, let reason):
+      log("ACPBridge: deskpilot permission \(permissionRequestID) closed (\(reason))")
+      Task { @MainActor in
+        DeskPilotApprovalCoordinator.shared.close(permissionRequestID: permissionRequestID)
+      }
+      return
+
+    default:
+      break
+    }
+
     switch message {
     case .sessionStarted(let sid, let evtKey, _):
       if let evtKey = evtKey {
