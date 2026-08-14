@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
+import { ALLOW_ONCE_OUTCOME, DENY_OUTCOME } from "../dist/deskpilot-approval.js";
 import {
   attachHermesDisconnectRecovery,
   attachHermesPermissionLifecycle,
@@ -348,6 +349,7 @@ function raisePermission(provider, sessionId, overrides = {}) {
 
 function approvalResponse(overrides = {}) {
   return {
+    type: "deskpilot_permission_response",
     routeID: APPROVAL_ROUTE,
     sessionID: "hermes-session-1",
     permissionRequestID: APPROVAL_PERMISSION,
@@ -394,7 +396,7 @@ test("an approval releases the ACP request as allow_once, exactly once", async (
   });
 
   assert.equal(h.provider.permissions.length, 1);
-  assert.deepEqual(h.provider.permissions[0].outcome, { outcome: "allowed", optionId: "allow_once" });
+  assert.deepEqual(h.provider.permissions[0].outcome, { outcome: "selected", optionId: "allow_once" });
   assert.equal(h.provider.permissions[0].handle.rpcID, 77);
 
   // A replay of the same approval answers nothing further.
@@ -451,7 +453,7 @@ test("an approval carrying a mismatched correlation ID answers nothing and leave
 
   // The genuine approval still works — a wrong answer must not strand the turn.
   resolveDeskPilotPermission(approvalResponse(), { ...h.deps, now: () => APPROVAL_EXPIRES_MS - 30_000 });
-  assert.deepEqual(h.provider.permissions[0].outcome, { outcome: "allowed", optionId: "allow_once" });
+  assert.deepEqual(h.provider.permissions[0].outcome, { outcome: "selected", optionId: "allow_once" });
 });
 
 test("a permission request whose _meta disagrees with its handle is denied on arrival", async () => {
@@ -485,4 +487,13 @@ test("a provider-closed permission cannot later be approved", async () => {
 
   resolveDeskPilotPermission(approvalResponse(), { ...h.deps, now: () => APPROVAL_EXPIRES_MS - 30_000 });
   assert.equal(h.provider.permissions.length, 0, "a forgotten request has nothing left to approve");
+});
+
+test("the ACP outcomes match acp.schema's discriminators exactly", () => {
+  // acp.schema.AllowedOutcome is `outcome: Literal["selected"]` and
+  // DeniedOutcome is `outcome: Literal["cancelled"]`. Sending "allowed" here
+  // once produced a reply Hermes could not read as consent, so it denied a
+  // request the user had approved. Pin both literals.
+  assert.deepEqual(ALLOW_ONCE_OUTCOME, { outcome: "selected", optionId: "allow_once" });
+  assert.deepEqual(DENY_OUTCOME, { outcome: "cancelled" });
 });

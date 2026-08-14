@@ -32,6 +32,11 @@ const handle = { rpcID: 7, generation: 1, sessionId: SESSION, permissionRequestI
 
 function response(overrides = {}) {
   return {
+    // The literal frame the app puts on the wire, `type` included. An earlier
+    // version of this helper omitted `type`, so the store accepted a shape the
+    // app never sends and rejected every real approval as malformed. Keep this
+    // identical to `DeskPilotPermissionResponseMessage`.
+    type: "deskpilot_permission_response",
     routeID: ROUTE,
     sessionID: SESSION,
     permissionRequestID: PERMISSION,
@@ -130,6 +135,9 @@ test("anything that is not exactly allow_once or deny is denied", () => {
 test("a malformed or extra-keyed response is denied without consuming the request", () => {
   const store = openStore();
   assert.equal(store.resolve(response({ scope: "session" }), EXPIRES_MS - 1_000).reason, "malformed");
+  assert.equal(store.resolve(response({ type: "query" }), EXPIRES_MS - 1_000).reason, "malformed");
+  const { type: _dropped, ...untyped } = response();
+  assert.equal(store.resolve(untyped, EXPIRES_MS - 1_000).reason, "malformed");
   assert.equal(store.resolve("allow", EXPIRES_MS - 1_000).reason, "malformed");
   assert.equal(store.resolve(null, EXPIRES_MS - 1_000).reason, "malformed");
   // The genuine reply still works: a malformed frame must not be able to burn

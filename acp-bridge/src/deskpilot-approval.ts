@@ -80,6 +80,7 @@ const CORRELATION_KEYS = [
 ] as const;
 
 const RESPONSE_KEYS = [
+  "type",
   "routeID",
   "sessionID",
   "permissionRequestID",
@@ -173,6 +174,11 @@ export class DeskPilotApprovalStore {
     for (const key of RESPONSE_KEYS) {
       if (!nonEmptyString(response[key])) return { allowed: false, reason: "malformed" };
     }
+    // The whole wire frame is validated, `type` included, so an extra or
+    // renamed field is a rejection rather than something quietly ignored.
+    if (response.type !== "deskpilot_permission_response") {
+      return { allowed: false, reason: "malformed" };
+    }
 
     const key = response.permissionRequestID as string;
     const record = this.records.get(key);
@@ -223,10 +229,22 @@ export class DeskPilotApprovalStore {
   }
 }
 
-/** The ACP outcome for an approved request. `allow_once` is the only option
- *  DeskPilot offers: there is no "allow always" and no session-scoped grant,
- *  so no approval can ever cover an action the user was not shown. */
-export const ALLOW_ONCE_OUTCOME = { outcome: "allowed", optionId: "allow_once" } as const;
+/**
+ * The ACP outcome for an approved request.
+ *
+ * The discriminator is `"selected"`, not `"allowed"` — `acp.schema.AllowedOutcome`
+ * declares `outcome: Literal["selected"]`. Sending `"allowed"` produced a
+ * response Hermes could not read as an approval, so it denied with "approval
+ * capability required" even though the parent had already resolved. That was
+ * the dual-authority gate behaving correctly on a bridge that was wrong, which
+ * is exactly why the ACP leg is not permitted to be a formality.
+ *
+ * `allow_once` is the only option DeskPilot offers: there is no allow-always
+ * and no session-scoped grant, so no approval can cover an action the user was
+ * not shown.
+ */
+export const ALLOW_ONCE_OUTCOME = { outcome: "selected", optionId: "allow_once" } as const;
 
-/** The ACP outcome for everything else. */
+/** The ACP outcome for everything else. `acp.schema.DeniedOutcome` is
+ *  `outcome: Literal["cancelled"]`. */
 export const DENY_OUTCOME = { outcome: "cancelled" } as const;

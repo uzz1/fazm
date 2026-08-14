@@ -112,7 +112,7 @@ final class DeskPilotApprovalCoordinator {
   }
 
   private func deny(_ request: Request, why: String) {
-    fputs("[deskpilot] approval denied for \(request.pendingApprovalID): \(why)\n", stderr)
+    log("DeskPilotApproval: DENIED pending=\(request.pendingApprovalID) permission=\(request.permissionRequestID) — \(why)")
     finish(request, approved: false)
   }
 
@@ -141,19 +141,22 @@ final class DeskPilotApprovalCoordinator {
         deny(request, why: "closed while being looked up")
         return
       }
+      log("DeskPilotApproval: presenting \(action.actionID) v\(action.actionVersion) "
+        + "risk=\(action.risk) verdict=\(action.verdict) inputs=\(action.displayInputs.map { "\($0.0)=\($0.1)" }.joined(separator: ",")) "
+        + "trace=\(action.traceID)")
       present(request, action)
     }
   }
 
   nonisolated private static func lookUp(pendingApprovalID: String) -> DeskPilotPendingAction? {
     guard let lease = DeskPilotUILease.lease() else {
-      fputs("[deskpilot] approval: no live UI lease\n", stderr)
+      logError("DeskPilotApproval: no live UI lease; cannot read what this action is")
       return nil
     }
     do {
       return try DeskPilotApprovalService.find(lease: lease, pendingApprovalID: pendingApprovalID)
     } catch {
-      fputs("[deskpilot] approval: look-up failed: \(error)\n", stderr)
+      logError("DeskPilotApproval: approval.list failed: \(error)")
       return nil
     }
   }
@@ -172,7 +175,18 @@ final class DeskPilotApprovalCoordinator {
 
     NSApp.activate(ignoringOtherApps: true)
     alert.window.level = .modalPanel
+    log("DeskPilotApproval: modal opening for \(action.actionID) pending=\(request.pendingApprovalID)")
+    let opened = Date()
     let response = alert.runModal()
+    let heldFor = Date().timeIntervalSince(opened)
+    log("DeskPilotApproval: modal returned raw=\(response.rawValue) "
+      + "(deny=\(NSApplication.ModalResponse.alertFirstButtonReturn.rawValue), "
+      + "allowOnce=\(NSApplication.ModalResponse.alertSecondButtonReturn.rawValue)) "
+      + "after \(String(format: "%.2f", heldFor))s "
+      + "frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?") "
+      + "appActive=\(NSApp.isActive)")
+    // Only the explicit second button is consent. Any other return — including
+    // an aborted or programmatically stopped modal — is a denial.
     let approved = response == .alertSecondButtonReturn
 
     guard approved else {
@@ -231,7 +245,7 @@ final class DeskPilotApprovalCoordinator {
       }.value
 
       if outcome.approved {
-        fputs("[deskpilot] approved \(action.actionID) once (pending \(request.pendingApprovalID))\n", stderr)
+        log("DeskPilotApproval: APPROVED \(action.actionID) once, pending=\(request.pendingApprovalID) digest=\(action.actionDigest)")
         finish(request, approved: true)
       } else {
         deny(request, why: outcome.why)
