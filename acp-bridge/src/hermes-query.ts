@@ -14,19 +14,28 @@
  *     send `mcpServers: []` unconditionally, because anything registered here
  *     would be a second execution path the DeskPilot policy gate never sees.
  *
- *   - Inbound `session/request_permission` is answered fail-closed. The policy
- *     gate's user-facing approval lives on the parent socket (Hermes' policy
- *     server) and, later, in the DeskPilot Swift UI; this bridge has no
- *     approval surface of its own, so it denies immediately rather than either
- *     rubber-stamping the request or letting the turn hang until the handle
- *     expires. See `onPermission` inside handleHermesQuery. This is the seam
- *     the DeskPilot approval UI replaces in Tasks 13-15.
+ *   - Inbound `session/request_permission` is forwarded to the DeskPilot
+ *     approval UI, and answered fail-closed in every case where it is not.
+ *     This bridge carries only the ACP half of the approval; the parent policy
+ *     socket's `approval.resolved` event is the other half, and Hermes requires
+ *     both. See `onPermission` below and `deskpilot-approval.ts`.
  */
 
-import type { OutboundMessage, PriorContextEntry, QueryMessage } from "./protocol.js";
+import type {
+  DeskPilotPermissionResponseMessage,
+  OutboundMessage,
+  PriorContextEntry,
+  QueryMessage,
+} from "./protocol.js";
 import type { ACPRoute } from "./hermes-route.js";
 import type { PermissionHandle } from "./stdio-provider.js";
 import { translateCodexUpdate, type TranslatorState } from "./acp-translate.js";
+import {
+  ALLOW_ONCE_OUTCOME,
+  DENY_OUTCOME,
+  DeskPilotApprovalStore,
+  readCorrelation,
+} from "./deskpilot-approval.js";
 
 /**
  * The slice of GenericACPProvider hermes-query depends on. Narrowing it keeps
@@ -74,6 +83,122 @@ interface HermesSessionEntry {
 
 const hermesSessions = new Map<string, HermesSessionEntry>();
 const hermesSessionIdToKey = new Map<string, string>();
+
+/**
+ * Pending permission requests, keyed by permission request ID.
+ *
+ * Module scope, not turn scope: the request is raised inside a turn but
+ * answered by a human seconds or minutes later, on a different message. A
+ * per-turn table would lose the record the moment `handleHermesQuery` returned
+ * and every approval would fail closed as `unknown_request`.
+ */
+const approvals = new DeskPilotApprovalStore();
+
+/** Answer one ACP permission request with a denial. Never throws: a provider
+ *  that has already expired or discarded the handle has, by that fact, already
+ *  denied it. */
+function denyPermission(
+  provider: HermesProviderLike,
+  handle: PermissionHandle,
+  logErr: (msg: string) => void,
+  why: string,
+): void {
+  try {
+    provider.permission(handle, DENY_OUTCOME);
+    logErr(`[hermes-query] denied permission ${handle.permissionRequestID}: ${why}`);
+  } catch (err) {
+    logErr(`[hermes-query] permission ${handle.permissionRequestID} already closed (${why}): ${err}`);
+  }
+}
+
+/**
+ * Apply the human's answer, arriving from the app as a
+ * `deskpilot_permission_response`.
+ *
+ * Only an exact match on all four correlation IDs, inside the expiry window,
+ * with the literal decision `allow_once`, releases the ACP request as allowed.
+ * Everything else denies — and a response that names no known record replies to
+ * nothing at all, because there is no request of ours it could be answering.
+ */
+export function resolveDeskPilotPermission(
+  msg: DeskPilotPermissionResponseMessage,
+  deps: {
+    getProvider: () => HermesProviderLike;
+    send: (msg: OutboundMessage) => void;
+    logErr: (msg: string) => void;
+    now?: () => number;
+  },
+): void {
+  const { send, logErr } = deps;
+  const verdict = approvals.resolve(msg, (deps.now ?? Date.now)());
+
+  if (!verdict.allowed && verdict.handle === undefined) {
+    // malformed / unknown_request / correlation_mismatch: there is no request
+    // of ours to reply to, so the only correct action is to drop it. The real
+    // request, if there is one, stays pending until it expires.
+    logErr(`[hermes-query] ignoring permission response: ${verdict.reason}`);
+    return;
+  }
+
+  let provider: HermesProviderLike;
+  try {
+    provider = deps.getProvider();
+  } catch (err) {
+    logErr(`[hermes-query] cannot answer permission, provider gone: ${err}`);
+    return;
+  }
+
+  if (verdict.allowed) {
+    try {
+      provider.permission(verdict.handle, ALLOW_ONCE_OUTCOME);
+      logErr(`[hermes-query] allowed permission ${verdict.handle.permissionRequestID} once`);
+    } catch (err) {
+      logErr(`[hermes-query] approval arrived too late for ${verdict.handle.permissionRequestID}: ${err}`);
+    }
+  } else {
+    denyPermission(provider, verdict.handle!, logErr, verdict.reason);
+  }
+
+  send({
+    type: "deskpilot_permission_closed",
+    permissionRequestID: msg.permissionRequestID,
+    reason: "resolved",
+  } as OutboundMessage);
+}
+
+/**
+ * Keep the pending table honest about requests the provider closed on its own.
+ *
+ * `GenericACPProvider` answers `cancelled` itself when its expiry timer fires,
+ * when the session is cancelled, and when the child exits. Each of those is a
+ * denial that already happened; all this does is drop the stale record — so a
+ * later click cannot resolve it — and tell the app to stop offering the choice.
+ */
+export function attachHermesPermissionLifecycle(
+  provider: HermesProviderLike,
+  deps: { send: (msg: OutboundMessage) => void; logErr: (msg: string) => void },
+): void {
+  const close = (reason: "expired" | "cancelled" | "transport_lost") =>
+    (event: { permissionRequestID?: string; reason?: string }) => {
+      const id = event?.permissionRequestID;
+      if (!id) return;
+      approvals.forget(id);
+      deps.logErr(`[hermes-query] permission ${id} closed by the provider: ${event?.reason ?? reason}`);
+      deps.send({
+        type: "deskpilot_permission_closed",
+        permissionRequestID: id,
+        reason,
+      } as OutboundMessage);
+    };
+  provider.on("permissionExpired", close("expired"));
+  provider.on("permissionCancelled", close("cancelled"));
+}
+
+/** Test seam and shutdown hook: forget every pending approval. Each is thereby
+ *  denied, since nothing can resolve a record that is not in the table. */
+export function clearDeskPilotApprovals(): number {
+  return approvals.drain().length;
+}
 /** Providers already handshaked. `initialize` is a per-process handshake, not a
  *  per-turn one; re-sending it every query would burn a round trip on the
  *  visible turn for no gain. */
@@ -212,22 +337,48 @@ export async function handleHermesQuery(msg: QueryMessage, deps: HermesQueryDeps
   };
 
   /**
-   * Fail closed. The bridge cannot approve on the user's behalf: the approval
-   * that matters is the parent-socket one Hermes' policy gate waits on, and
-   * DeskPilot's own approval UI does not exist in this process. Answering
-   * `cancelled` immediately keeps the contract (every request gets exactly one
-   * reply) without inventing consent, and without a multi-minute stall while
-   * the provider's expiry timer runs down.
+   * Forward a correlated permission request to the approval UI; deny anything
+   * that cannot be correlated.
+   *
+   * The bridge never approves on the user's behalf. All it does here is put a
+   * request in the pending table and tell the app its correlation IDs — no
+   * title, no model-authored input. Consent arrives later, as an explicit
+   * `deskpilot_permission_response`, and even then it only supplies the ACP
+   * half; Hermes still requires the parent policy socket's matching event.
+   *
+   * An uncorrelated request is denied at once rather than shown. Without the
+   * `_meta.deskpilot` block there is no `pendingApprovalID`, so the app could
+   * not look up what the action actually is, and no parent approval could ever
+   * match it — approving it would be consenting to something unidentifiable.
    */
   const onPermission = (event: unknown): void => {
-    const handle = (event as { handle?: PermissionHandle } | undefined)?.handle;
+    const framed = event as { frame?: unknown; handle?: PermissionHandle } | undefined;
+    const handle = framed?.handle;
     if (!handle || handle.sessionId !== sessionId) return;
-    try {
-      provider.permission(handle, { outcome: "cancelled" });
-      logErr(`[hermes-query] denied permission ${handle.permissionRequestID} (no approval surface in the bridge)`);
-    } catch (err) {
-      logErr(`[hermes-query] permission reply failed for ${handle.permissionRequestID}: ${err}`);
+
+    const correlation = readCorrelation(framed?.frame);
+    if (
+      !correlation ||
+      correlation.sessionID !== handle.sessionId ||
+      correlation.permissionRequestID !== handle.permissionRequestID ||
+      !approvals.open(correlation, handle)
+    ) {
+      denyPermission(provider, handle, logErr, "uncorrelated or duplicate permission request");
+      return;
     }
+
+    sendWithSession(sessionId, {
+      type: "deskpilot_permission_request",
+      routeID: correlation.routeID,
+      sessionID: correlation.sessionID,
+      permissionRequestID: correlation.permissionRequestID,
+      pendingApprovalID: correlation.pendingApprovalID,
+      expiresAt: correlation.expiresAt,
+    } as OutboundMessage);
+    logErr(
+      `[hermes-query] awaiting approval for pending=${correlation.pendingApprovalID} ` +
+        `permission=${correlation.permissionRequestID} expires=${correlation.expiresAt}`,
+    );
   };
 
   provider.on("notification", onNotification);

@@ -44,6 +44,8 @@ import { GenericACPProvider } from "./stdio-provider.js";
 import { HermesRouteStore } from "./hermes-route.js";
 import {
   attachHermesDisconnectRecovery,
+  attachHermesPermissionLifecycle,
+  resolveDeskPilotPermission,
   handleHermesQuery,
   dropHermesSession,
   interruptHermesSession,
@@ -1242,10 +1244,12 @@ function getHermesProvider(): GenericACPProvider {
     const provider = new GenericACPProvider(offlineProviderConfig());
     provider.on("stderr", (chunk: string) => logErr(`[hermes] ${String(chunk).trimEnd()}`));
     provider.on("protocolError", (err: Error) => logErr(`[hermes] protocol error: ${err.message}`));
-    provider.on("permissionExpired", (handle: { permissionRequestID: string }) =>
-      logErr(`[hermes] permission ${handle.permissionRequestID} expired unanswered`));
     provider.on("disconnect", (event: { terminal: boolean }) =>
       logErr(`[hermes] transport lost (terminal=${event.terminal})`));
+    // Drops pending approvals the provider closed on its own (expiry, session
+    // cancel, child exit) so a later click cannot resolve a dead request, and
+    // tells the app to stop offering the choice.
+    attachHermesPermissionLifecycle(provider, { send, logErr });
     attachHermesDisconnectRecovery(provider, getHermesRoutes(), logErr);
     hermesProvider = provider;
   }
@@ -7094,6 +7098,13 @@ async function main(): Promise<void> {
         handleCodexInitProbe().catch((err) => {
           logErr(`codex probe handler threw: ${err}`);
         });
+        break;
+
+      case "deskpilot_permission_response":
+        // The human's answer to one permission request. This supplies only the
+        // ACP half of the approval — the app has separately resolved the
+        // parent policy socket, and Hermes requires both to agree.
+        resolveDeskPilotPermission(msg, { getProvider: getHermesProvider, send, logErr });
         break;
 
       case "gemini_init_probe":

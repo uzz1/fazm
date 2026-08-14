@@ -189,8 +189,31 @@ export interface ForkSessionMessage {
 // call. Swift therefore routes slash-command submissions through the
 // existing `QueryMessage` path — no dedicated bridge handler needed.
 
+/**
+ * Swift → bridge: the human's answer to one DeskPilot permission request.
+ *
+ * This is only half of an approval. Before sending it the app must already have
+ * called `approval.resolve` on the parent policy socket with its verified UI
+ * lease; Hermes waits on both that event and this ACP outcome, and denies
+ * unless the two agree on all four correlation IDs. Sending `allow_once` here
+ * without the parent leg approves nothing.
+ *
+ * All four IDs are echoed back so the bridge can prove the answer belongs to
+ * the request it is about to release. There is no `scope` field and no
+ * "remember this" flag: `allow_once` means once.
+ */
+export interface DeskPilotPermissionResponseMessage {
+  type: "deskpilot_permission_response";
+  routeID: string;
+  sessionID: string;
+  permissionRequestID: string;
+  pendingApprovalID: string;
+  decision: "allow_once" | "deny";
+}
+
 export type InboundMessage =
   | QueryMessage
+  | DeskPilotPermissionResponseMessage
   | ToolResultMessage
   | StopMessage
   | InterruptMessage
@@ -704,8 +727,41 @@ export interface SessionForkedMessage {
   toSessionKey: string;
 }
 
+/**
+ * Bridge → Swift: a privileged action is waiting on the human.
+ *
+ * Carries correlation and expiry only. The inbound ACP frame also holds a title
+ * and a raw input block that Hermes assembled from a model turn, and that model
+ * reads untrusted screen text and web content — so none of it is forwarded. The
+ * app takes `pendingApprovalID` to the parent policy server's `approval.list`
+ * and renders the action ID, version, and validated inputs the *registry*
+ * holds. What the user reads is the system's account of the action, never the
+ * model's.
+ *
+ * `expiresAt` is the parent's deadline. After it, an approval is not an
+ * approval — the app must stop offering the choice, and both the bridge and
+ * Hermes reject a late answer independently.
+ */
+export interface DeskPilotPermissionRequestMessage {
+  type: "deskpilot_permission_request";
+  routeID: string;
+  sessionID: string;
+  permissionRequestID: string;
+  pendingApprovalID: string;
+  expiresAt: string;
+}
+
+/** Bridge → Swift: a pending request is gone and must stop being offered. */
+export interface DeskPilotPermissionClosedMessage {
+  type: "deskpilot_permission_closed";
+  permissionRequestID: string;
+  reason: "expired" | "cancelled" | "transport_lost" | "resolved";
+}
+
 export type OutboundMessage =
   | InitMessage
+  | DeskPilotPermissionRequestMessage
+  | DeskPilotPermissionClosedMessage
   | TextDeltaMessage
   | ToolUseMessage
   | ToolActivityMessage
